@@ -8,12 +8,13 @@ export const once = true;
 const MIN_TEMPLATE_THRESHOLDS = {
   welcome: 20,
   morning: 10,
-  warning: 0,
+  warning: 10,
 } as const;
 
 const GENERATION_COUNTS = {
   welcome: 50,
   morning: 20,
+  warning: 30,
 } as const;
 
 const setBotStatus = (client: Client) => {
@@ -61,9 +62,9 @@ const generateInitialTemplates = async (stats: {
     await templateService.generateMorningTemplates(GENERATION_COUNTS.morning);
   }
 
-  if (stats.warning.total === MIN_TEMPLATE_THRESHOLDS.warning) {
-    logger.info("Seeding warning templates...");
-    await templateService.seedDefaultWarningTemplates();
+  if (stats.warning.total < MIN_TEMPLATE_THRESHOLDS.welcome) {
+    logger.info("Generating initial warning templates...");
+    await templateService.generateWarningTemplates(GENERATION_COUNTS.welcome);
   }
 };
 

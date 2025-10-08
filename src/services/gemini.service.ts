@@ -3,14 +3,11 @@ import { logger } from "@/utils/logger";
 import { cfg } from "@/utils/config";
 import {
   generateFriendlyResponsePrompt,
-  generateMorningMessagePrompt,
+  generateMorningTemplatesPrompt,
   generateRandomChatPrompt,
-  generateWarningMessagePrompt,
+  generateWarningTemplatesPrompt,
   generateWelcomeTemplatesPrompt,
 } from "@/data/prompts";
-
-type MoodType = "motivational" | "chill" | "energetic";
-type ViolationType = "spam" | "badword" | "link";
 
 const RATE_LIMIT_DURATION_MS = 60 * 1000; // 1 minute
 const MAX_REQUESTS_PER_MINUTE = 15;
@@ -135,6 +132,57 @@ export class GeminiService {
     return JSON.parse(jsonMatch[0]);
   }
 
+  private extractWarningTemplates(
+    response: string
+  ): Array<{ type: string; content: string; severity: string }> {
+    const jsonMatch = response.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error("No JSON array found in response");
+
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (!Array.isArray(parsed)) throw new Error("Response is not an array");
+
+      return parsed.map((item) => {
+        if (!item.type || !item.content || !item.severity) {
+          throw new Error("Invalid template structure");
+        }
+        return {
+          type: item.type,
+          content: item.content,
+          severity: item.severity,
+        };
+      });
+    } catch (error) {
+      logger.error("Failed to parse warning templates:", error);
+      throw new Error("Failed to parse AI response for warning templates");
+    }
+  }
+
+  private extractMorningTemplates(
+    response: string
+  ): Array<{ content: string; moodTag: string }> {
+    const jsonMatch = response.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error("No JSON array found in response");
+
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (!Array.isArray(parsed)) throw new Error("Response is not an array");
+
+      return parsed.map((item) => {
+        if (!item.content || !item.moodTag) {
+          throw new Error("Invalid template structure");
+        }
+        return {
+          content: item.content,
+          moodTag: item.moodTag,
+        };
+      });
+    } catch (error) {
+      logger.error("Failed to parse morning templates:", error);
+      throw new Error("Failed to parse AI response for morning templates");
+    }
+  }
+
   async generate(
     prompt: string,
     options?: { temperature?: number; maxTokens?: number }
@@ -198,18 +246,44 @@ export class GeminiService {
     }
   }
 
-  async generateMorningMessage(
-    mood: MoodType = "motivational"
-  ): Promise<string> {
-    const moodDescriptions: Record<MoodType, string> = {
-      motivational: "motivating and encouraging, full of positive energy",
-      chill: "calm, peaceful, and relaxing like a morning coffee",
-      energetic: "exciting and energetic, ready to conquer the day",
-    };
+  async generateWarningTemplates(
+    count = 20
+  ): Promise<Array<{ type: string; content: string; severity: string }>> {
+    const prompt = generateWarningTemplatesPrompt(count);
 
-    const prompt = generateMorningMessagePrompt(moodDescriptions[mood]);
+    const response = await this.generate(prompt, {
+      temperature: 0.9,
+      maxTokens: 3000,
+    });
 
-    return this.generate(prompt, { temperature: 0.85, maxTokens: 150 });
+    try {
+      const templates = this.extractWarningTemplates(response);
+      logger.info(`Generated ${templates.length} warning templates`);
+      return templates;
+    } catch (error) {
+      logger.error("Failed to parse warning templates:", error);
+      throw new Error("Failed to parse AI response");
+    }
+  }
+
+  async generateMorningTemplates(
+    count = 20
+  ): Promise<Array<{ content: string; moodTag: string }>> {
+    const prompt = generateMorningTemplatesPrompt(count);
+
+    const response = await this.generate(prompt, {
+      temperature: 0.9,
+      maxTokens: 3000,
+    });
+
+    try {
+      const templates = this.extractMorningTemplates(response);
+      logger.info(`Generated ${templates.length} morning templates`);
+      return templates;
+    } catch (error) {
+      logger.error("Failed to parse morning templates:", error);
+      throw new Error("Failed to parse AI response");
+    }
   }
 
   async generateFriendlyResponse(
@@ -235,24 +309,6 @@ export class GeminiService {
     const prompt = generateRandomChatPrompt(topic);
 
     return this.generate(prompt, { temperature: 0.95, maxTokens: 100 });
-  }
-
-  async generateWarningMessage(
-    type: ViolationType,
-    userName: string
-  ): Promise<string> {
-    const violationDescriptions: Record<ViolationType, string> = {
-      spam: "sending too many messages too quickly",
-      badword: "using inappropriate language",
-      link: "sharing unauthorized links",
-    };
-
-    const prompt = generateWarningMessagePrompt(
-      userName,
-      violationDescriptions[type]
-    );
-
-    return this.generate(prompt, { temperature: 0.7, maxTokens: 150 });
   }
 
   getUsageStats() {

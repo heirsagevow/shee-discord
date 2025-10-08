@@ -47,6 +47,8 @@ export const warningTemplates = pgTable("warning_templates", {
   type: varchar("type", { length: 50 }).notNull(),
   content: text("content").notNull(),
   severity: varchar("severity", { length: 20 }).notNull(),
+  usedCount: integer("used_count").default(0).notNull(),
+  lastUsedAt: timestamp("last_used_at"),
 });
 
 // User Interactions & Mood Tracking

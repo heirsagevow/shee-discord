@@ -148,7 +148,41 @@ export class TemplateService {
     }
   }
 
-  private async findMorningTemplate(mood?: MoodType) {
+  private async getAvailableMorningTemplateCount(
+    mood?: MoodType
+  ): Promise<number> {
+    const [{ value }] = await db
+      .select({ value: count() })
+      .from(morningMessageTemplates)
+      .where(
+        mood
+          ? sql`${morningMessageTemplates.usedCount} < ${USAGE_THRESHOLD} AND ${morningMessageTemplates.moodTag} = ${mood}`
+          : sql`${morningMessageTemplates.usedCount} < ${USAGE_THRESHOLD}`
+      );
+
+    return value;
+  }
+
+  private async checkAndGenerateMorningTemplatesIfNeeded(
+    mood?: MoodType
+  ): Promise<void> {
+    if (this.isGenerating) return;
+
+    const availableCount = await this.getAvailableMorningTemplateCount(mood);
+
+    if (availableCount < LOW_TEMPLATE_THRESHOLD) {
+      logger.info(
+        `Low morning template count for mood ${
+          mood || "any"
+        }, triggering generation...`
+      );
+      this.generateMorningTemplates(20).catch((err) =>
+        logger.error("Background morning template generation failed:", err)
+      );
+    }
+  }
+
+  private async getLeastUsedMorningTemplate(mood?: MoodType) {
     const query = db
       .select()
       .from(morningMessageTemplates)
@@ -162,13 +196,11 @@ export class TemplateService {
       ? await query.where(sql`${morningMessageTemplates.moodTag} = ${mood}`)
       : await query;
 
-    return template;
-  }
+    if (!template) {
+      throw new Error("No morning templates available");
+    }
 
-  private async generateMorningMessageOnTheFly(mood?: MoodType) {
-    logger.info("No morning template found, generating on-the-fly");
-    const content = await geminiService.generateMorningMessage(mood);
-    return { content };
+    return template;
   }
 
   private async markMorningTemplateAsUsed(templateId: number): Promise<void> {
@@ -182,113 +214,196 @@ export class TemplateService {
   }
 
   async getMorningMessageTemplate(mood?: MoodType) {
-    const template = await this.findMorningTemplate(mood);
-
-    if (!template) {
-      return this.generateMorningMessageOnTheFly(mood);
-    }
-
+    await this.checkAndGenerateMorningTemplatesIfNeeded(mood);
+    const template = await this.getLeastUsedMorningTemplate(mood);
     await this.markMorningTemplateAsUsed(template.id);
     return template;
   }
 
   async generateMorningTemplates(count = 20): Promise<void> {
-    const moods: MoodType[] = ["motivational", "chill", "energetic"];
-    const perMood = Math.ceil(count / moods.length);
-
-    logger.info(`Generating ${count} morning templates in batches...`);
-
-    for (const mood of moods) {
-      const batches = Math.ceil(perMood / BATCH_SIZE);
-
-      for (let i = 0; i < batches; i++) {
-        const batchCount = Math.min(BATCH_SIZE, perMood - i * BATCH_SIZE);
-        const data: NewMorningMessageTemplate[] = [];
-
-        for (let j = 0; j < batchCount; j++) {
-          try {
-            const content = await geminiService.generateMorningMessage(mood);
-            data.push({ content, moodTag: mood });
-            await this.delay(1000);
-          } catch (error) {
-            logger.error(
-              `Failed to generate morning template (${mood}):`,
-              error
-            );
-          }
-        }
-
-        if (data.length > 0) {
-          await db.insert(morningMessageTemplates).values(data);
-          logger.info(`✅ Generated ${data.length} ${mood} morning templates`);
-        }
-
-        if (i < batches - 1) {
-          await this.delay(BATCH_DELAY_MS);
-        }
-      }
+    if (this.isGenerating) {
+      logger.warn("Template generation already in progress, skipping...");
+      return;
     }
 
-    logger.info("✅ Completed morning template generation");
+    try {
+      this.isGenerating = true;
+      logger.info(`Starting batch generation of ${count} morning templates...`);
+
+      const moods: MoodType[] = ["motivational", "chill", "energetic"];
+      const perMood = Math.ceil(count / moods.length);
+
+      for (const mood of moods) {
+        const batches = Math.ceil(perMood / BATCH_SIZE);
+        let totalGenerated = 0;
+
+        for (let i = 0; i < batches; i++) {
+          const batchCount = Math.min(BATCH_SIZE, perMood - totalGenerated);
+
+          try {
+            const templates = await geminiService.generateMorningTemplates(
+              batchCount
+            );
+
+            const data: NewMorningMessageTemplate[] = templates.map(
+              ({ content, moodTag }) => ({
+                content,
+                moodTag: moodTag as MoodType,
+                usedCount: 0,
+              })
+            );
+
+            await db.insert(morningMessageTemplates).values(data);
+            totalGenerated += templates.length;
+
+            logger.info(
+              `✅ Batch ${i + 1}/${batches}: Generated ${
+                templates.length
+              } ${mood} templates (Total: ${totalGenerated}/${perMood})`
+            );
+
+            if (i < batches - 1) {
+              await this.delay(BATCH_DELAY_MS);
+            }
+          } catch (error) {
+            logger.error(
+              `Failed to generate batch ${i + 1} for ${mood}:`,
+              error
+            );
+            if (i === 0) throw error;
+          }
+        }
+      }
+
+      logger.info(`✅ Completed: Generated morning templates for all moods`);
+    } catch (error) {
+      logger.error("Failed to generate morning templates:", error);
+      throw error;
+    } finally {
+      this.isGenerating = false;
+    }
   }
 
-  async getWarningTemplate(type: ViolationType): Promise<NewWarningTemplate> {
+  private async getAvailableWarningTemplateCount(
+    type: ViolationType
+  ): Promise<number> {
+    const [{ value }] = await db
+      .select({ value: count() })
+      .from(warningTemplates)
+      .where(sql`${warningTemplates.type} = ${type}`);
+
+    return value;
+  }
+
+  private async checkAndGenerateWarningTemplatesIfNeeded(
+    type: ViolationType
+  ): Promise<void> {
+    if (this.isGenerating) return;
+
+    const availableCount = await this.getAvailableWarningTemplateCount(type);
+
+    if (availableCount < LOW_TEMPLATE_THRESHOLD) {
+      logger.info(
+        `Low warning template count for type ${type}, triggering generation...`
+      );
+      this.generateWarningTemplates(20).catch((err) =>
+        logger.error("Background warning template generation failed:", err)
+      );
+    }
+  }
+
+  private async getLeastUsedWarningTemplate(type: ViolationType) {
     const [template] = await db
       .select()
       .from(warningTemplates)
       .where(sql`${warningTemplates.type} = ${type}`)
+      .orderBy(
+        asc(warningTemplates.usedCount),
+        asc(warningTemplates.lastUsedAt)
+      )
       .limit(1);
 
     if (!template) {
-      await this.seedDefaultWarningTemplates();
-      return this.getWarningTemplate(type);
+      throw new Error(`No warning templates available for type: ${type}`);
     }
 
     return template;
   }
 
-  async seedDefaultWarningTemplates(): Promise<void> {
-    const defaults: NewWarningTemplate[] = [
-      {
-        type: "spam",
-        content:
-          "🍵 Hey {user}, sepertinya kamu lagi terlalu semangat ya? Let's slow down a bit, oke?",
-        severity: "soft",
-      },
-      {
-        type: "spam",
-        content:
-          "☕ {user}, take a breath~ Kita punya waktu kok, gak perlu buru-buru",
-        severity: "soft",
-      },
-      {
-        type: "badword",
-        content:
-          "🌿 {user}, yuk kita jaga kata-kata ya~ Biar tetap sama sama nyaman 💚",
-        severity: "soft",
-      },
-      {
-        type: "badword",
-        content:
-          "🫖 {user}, mungkin coba pakai kata lain ya? Let's keep it friendly here~",
-        severity: "soft",
-      },
-      {
-        type: "link",
-        content:
-          "🔗 {user}, mohon maaf ya~ Link ini belum di-whitelist. Coba tanya mod dulu oke?",
-        severity: "soft",
-      },
-      {
-        type: "link",
-        content:
-          "✨ {user}, untuk keamanan bersama, link-nya aku hapus dulu ya. Kalau penting bisa minta izin ke mod~",
-        severity: "soft",
-      },
-    ];
+  private async markWarningTemplateAsUsed(templateId: number): Promise<void> {
+    await db
+      .update(warningTemplates)
+      .set({
+        usedCount: sql`${warningTemplates.usedCount} + 1`,
+        lastUsedAt: new Date(),
+      })
+      .where(sql`${warningTemplates.id} = ${templateId}`);
+  }
 
-    await db.insert(warningTemplates).values(defaults);
-    logger.info("✅ Seeded default warning templates");
+  async getWarningTemplate(type: ViolationType) {
+    await this.checkAndGenerateWarningTemplatesIfNeeded(type);
+    const template = await this.getLeastUsedWarningTemplate(type);
+    await this.markWarningTemplateAsUsed(template.id);
+    return template;
+  }
+
+  async generateWarningTemplates(count = 20): Promise<void> {
+    if (this.isGenerating) {
+      logger.warn("Template generation already in progress, skipping...");
+      return;
+    }
+
+    try {
+      this.isGenerating = true;
+      logger.info(`Starting batch generation of ${count} warning templates...`);
+
+      const batches = Math.ceil(count / BATCH_SIZE);
+      let totalGenerated = 0;
+
+      for (let i = 0; i < batches; i++) {
+        const batchCount = Math.min(BATCH_SIZE, count - totalGenerated);
+
+        try {
+          const templates = await geminiService.generateWarningTemplates(
+            batchCount
+          );
+
+          const data: NewWarningTemplate[] = templates.map(
+            ({ type, content, severity }) => ({
+              type: type as ViolationType,
+              content,
+              severity,
+              usedCount: 0,
+            })
+          );
+
+          await db.insert(warningTemplates).values(data);
+          totalGenerated += templates.length;
+
+          logger.info(
+            `✅ Batch ${i + 1}/${batches}: Generated ${
+              templates.length
+            } warning templates (Total: ${totalGenerated}/${count})`
+          );
+
+          if (i < batches - 1) {
+            await this.delay(BATCH_DELAY_MS);
+          }
+        } catch (error) {
+          logger.error(`Failed to generate batch ${i + 1}:`, error);
+          if (i === 0) throw error;
+        }
+      }
+
+      logger.info(
+        `✅ Completed: Generated ${totalGenerated} warning templates`
+      );
+    } catch (error) {
+      logger.error("Failed to generate warning templates:", error);
+      throw error;
+    } finally {
+      this.isGenerating = false;
+    }
   }
 
   private async getTotalUsageCount(): Promise<number> {

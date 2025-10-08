@@ -249,6 +249,28 @@ export class ModerationService {
     warningCount: number
   ): Promise<void> {
     try {
+      const botMember = member.guild.members.cache.get(member.client.user!.id);
+      if (!botMember) {
+        logger.error("Could not find bot member in guild");
+        return;
+      }
+
+      // Check if bot has the required permissions
+      if (!botMember.permissions.has("ModerateMembers")) {
+        logger.error("Bot lacks ModerateMembers permission");
+        return;
+      }
+
+      // Check role hierarchy
+      if (member.roles.highest.position >= botMember.roles.highest.position) {
+        logger.info(
+          `Skipping timeout for ${member.user.tag} - user has equal or higher role`
+        );
+        // Record the attempt but skip the timeout
+        await this.recordWarning(member.user.id, member.guild.id, reason);
+        return;
+      }
+
       await member.timeout(
         MODERATION_CONFIG.timeoutDurationMs,
         `Escalated from Shee: ${reason} (${warningCount} warnings)`

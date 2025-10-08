@@ -46,13 +46,34 @@ const createWelcomeEmbed = (
     .setTimestamp();
 
 const assignMemberRole = async (member: GuildMember): Promise<void> => {
-  const memberRole = member.guild.roles.cache.find(
-    (role) => role.name === MEMBER_ROLE_NAME
-  );
+  try {
+    const memberRole = member.guild.roles.cache.find(
+      (role) => role.name === MEMBER_ROLE_NAME
+    );
 
-  if (memberRole) {
+    if (!memberRole) {
+      logger.warn(`Member role '${MEMBER_ROLE_NAME}' not found`);
+      return;
+    }
+
+    const botMember = member.guild.members.cache.get(member.client.user!.id);
+    if (!botMember) {
+      logger.warn("Could not find bot member in guild");
+      return;
+    }
+
+    // Check if bot's highest role is lower than the role to be assigned
+    if (memberRole.position >= botMember.roles.highest.position) {
+      logger.info(
+        `Skipping role assignment for ${member.user.tag} - role hierarchy restriction`
+      );
+      return;
+    }
+
     await member.roles.add(memberRole);
     logger.info(`Assigned @Member role to ${member.user.tag}`);
+  } catch (error) {
+    logger.warn(`Could not assign role to ${member.user.tag} - skipping`);
   }
 };
 
@@ -94,7 +115,11 @@ export async function execute(member: GuildMember) {
     }
 
     const template = await templateService.getWelcomeTemplate();
-    await sendWelcomeMessage(member, channel, template.content);
+    await sendWelcomeMessage(
+      member,
+      channel,
+      template.content.replace("{user}", `<@${member.id}>`)
+    );
     await assignMemberRole(member);
   } catch (error) {
     logger.error("Error in welcome event:", error);

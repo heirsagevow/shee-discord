@@ -10,45 +10,20 @@ export const generateWelcomeTemplatesPrompt = (count: number) => {
     - Some messages can have emojis, some without (use light ones only)
     - 1–2 sentences each
     - Vary the vibe: cheerful, chill, soft, welcoming
-    - Address the member casually (like "Hi @...", "Welcome @...", "Heii @...")
+    - Include placeholder {user} for the username
 
     Example styles:
-    "Heii @....., makasii udah join yaa 😌 semoga betah di sini~"
-    "Welcome @.....! Santai aja yaa, kita semua friendly kok 🤗"
-    "Hai @....., akhirnya dateng juga 😭 yuk kenalan dulu di #general!"
-    "Heyy @....., seneng banget kamu join 🫶🏻 jangan lupa baca rules-nya yaa hehe"
-    "Welcome home @..... 😌 feel free to chit-chat di #general~"
+    "Heii {user}.., makasii udah join yaa 😌 semoga betah di sini~"
+    "Welcome {user}! Santai aja yaa, kita semua friendly kok 🤗"
+    "Hai {user}, akhirnya dateng juga 😭 yuk kenalan dulu di #general!"
+    "Heyy {user}, seneng banget kamu join 🫶🏻 jangan lupa baca rules-nya yaa hehe"
+    "Welcome home {user} 😌 feel free to chit-chat di #general~"
 
     Output format:
     Return ONLY a JSON array of strings, no explanations, no markdown, no extra text.
 
     Example output format:
     ["message1", "message2", "message3"]
-  `;
-};
-
-export const generateMorningMessagePrompt = (moodDescription: string) => {
-  return `
-    Generate one short morning greeting message in Bahasa Indonesia that feels ${moodDescription}.
-
-    Style & tone:
-    - Sound natural and spontaneous, like a friend saying good morning in chat
-    - 1–2 short sentences max
-    - Keep it warm and lighthearted, not motivational
-    - Use natural casual language (like "pagi~", "morningg", "hehe", "yaa", "😭", "😅")
-    - Include one morning emoji (☀️🌅🌄) naturally, not at every message
-    - Feel soft, maybe a bit playful or sleepy
-    - Avoid clichés or overly polished words like "semangat", "take it easy", "hari baru", etc.
-    - No markdown, no quotes, no extra formatting
-
-    Example styles:
-    "morningg semua 🤟 udah pada bangun belom ☀️"
-    "pagi~ siapa yang masih ngantuk nih 😅"
-    "hehe selamat pagi yaa 😌 jangan lupa sarapan ☀️"
-    "good morning 😭 masih pengen tidur gak sih"
-
-    Output format:
-    Return ONLY the message text, no markdown, no explanation.
   `;
 };
 
@@ -124,33 +99,57 @@ export const generateRandomChatPrompt = (topic: string) => {
   `;
 };
 
-export const generateWarningMessagePrompt = (
-  userName: string,
-  violationDescription: string
-) => {
+export const generateWarningTemplatesPrompt = (count: number) => {
   return `
-    Generate a soft, gentle, but firm warning message in natural Bahasa Indonesia for a Discord user who is ${violationDescription}.
-    
-    User: ${userName}
-    
-    Style & tone:
-    - Sound like a caring but confident friend (think "ketua kelas cantik" energy 😌)
-    - Be warm, polite, and slightly teasing — lembut tapi tetap punya wibawa
-    - Use casual, natural Indonesian (light Jaksel mix is okay, but keep it smooth)
-    - Use gentle expressions like: "eitss", "duh kamu nih", "yaa pelan-pelan aja", "jaga sikap yaa", "sabar ya", "hehe iya tau", etc.
-    - Keep it short: 1–2 sentences only
-    - Avoid forced metaphors or overused slang
-    - Optional: add light emojis (😌🫶🏻😅✨) to soften the tone
-    - Encourage them kindly to behave better, without sounding robotic
+    Generate ${count} unique, friendly, and gentle warning messages in Bahasa Indonesia for Discord users who violate rules.
 
-    Example styles:
-    "Eitss @${userName}... jaga sikap yaaa 😌"
-    "Duh @${userName}, pelan-pelan aja yaa 😅 jangan ${violationDescription} lagi"
-    "@${userName} sabar yaa, biar gak bikin suasana panas 😌"
-    "Hehe @${userName}, udah yaa jangan ${violationDescription} terus 😅"
-    "@${userName}, ayo dijaga yaa, biar enak dilihat semua 🫶🏻"
+    Style guidelines:
+    - Sound natural, casual, and friendly (like a caring friend reminding another friend)
+    - Mix Bahasa Indonesia and a bit of casual English naturally
+    - Be warm, polite, and slightly teasing — lembut tapi tetap punya wibawa
+    - Use gentle expressions like: "eitss", "duh kamu nih", "yaa pelan-pelan aja", "jaga sikap yaa", "sabar ya", "hehe iya tau", etc.
+    - Keep it short: 1-2 sentences only
+    - Avoid forced metaphors or overused slang
+    - Add light emojis (😌🫶🏻😅✨) to soften the tone
+    - Include placeholder {user} for the username
+    - Vary the tone: gentle, slightly firm, caring, playful
+    - types is "spam" | "badword" | "link"
 
     Output format:
-    Return ONLY the final message, no markdown, no extra explanation.
+    Return ONLY a JSON array of objects with "type", "content", and "severity" fields, no explanations, no markdown, no extra text.
+
+    Example output format:
+    [
+      {"type": "badword", "content": "Sabar...", "severity": "soft"},
+      {"type": "badword", "content": "Eitss {user}... jaga kata-kata yaaa 😌", "severity": "soft"},
+      {"type": "spam", "content": "Hehe {user}, udah yaa jangan spam terus 😅", "severity": "soft"}
+    ]
+  `;
+};
+
+export const generateMorningTemplatesPrompt = (count: number) => {
+  return `
+    Generate ${count} unique, natural morning greeting messages in Bahasa Indonesia for a Discord community.
+
+    Style guidelines:
+    - Sound natural and spontaneous, like a friend saying good morning in chat
+    - 1-2 short sentences max
+    - Keep it warm and lighthearted, not motivational
+    - Use natural casual language (like "pagi~", "morningg", "hehe", "yaa", "😭", "😅")
+    - Include one morning emoji (☀️🌅🌄) naturally, not at every message
+    - Feel soft, maybe a bit playful or sleepy
+    - Avoid clichés or overly polished words like "semangat", "take it easy", "hari baru", etc.
+    - Vary the mood: energetic, chill, sleepy, cheerful, cozy
+    - Some messages can have emojis, some without (use light ones only)
+
+    Output format:
+    Return ONLY a JSON array of objects with "content" and "moodTag" fields, no explanations, no markdown, no extra text.
+
+    Example output format:
+    [
+      {"content": "pagi semua 🤟 udah pada bangun belom ☀️", "moodTag": "energetic"},
+      {"content": "pagi~ siapa yang masih ngantuk nih 😅", "moodTag": "sleepy"},
+      {"content": "good morning 😭 masih pengen tidur gak sih", "moodTag": "sleepy"}
+    ]
   `;
 };

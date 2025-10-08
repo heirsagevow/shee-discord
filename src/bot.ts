@@ -11,6 +11,7 @@ const createDiscordClient = () =>
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.GuildModeration,
     ],
     partials: [Partials.Message, Partials.Channel, Partials.Reaction],
   });
