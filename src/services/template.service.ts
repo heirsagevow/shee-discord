@@ -16,9 +16,12 @@ type ViolationType = "spam" | "badword" | "link";
 
 const LOW_TEMPLATE_THRESHOLD = 10;
 const USAGE_THRESHOLD = 5;
+const BATCH_SIZE = 10;
+const BATCH_DELAY_MS = 5000;
 
 export class TemplateService {
   private static instance: TemplateService;
+  private isGenerating = false;
 
   private constructor() {}
 
@@ -39,11 +42,15 @@ export class TemplateService {
   }
 
   private async checkAndGenerateTemplatesIfNeeded(): Promise<void> {
+    if (this.isGenerating) return;
+
     const availableCount = await this.getAvailableTemplateCount();
 
     if (availableCount < LOW_TEMPLATE_THRESHOLD) {
       logger.info("Low template count, triggering generation...");
-      await this.generateWelcomeTemplates();
+      this.generateWelcomeTemplates(20).catch((err) =>
+        logger.error("Background template generation failed:", err)
+      );
     }
   }
 
@@ -81,22 +88,63 @@ export class TemplateService {
     return template;
   }
 
-  async generateWelcomeTemplates(count = 50): Promise<void> {
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async generateWelcomeTemplates(count = 20): Promise<void> {
+    if (this.isGenerating) {
+      logger.warn("Template generation already in progress, skipping...");
+      return;
+    }
+
     try {
-      logger.info(`Generating ${count} welcome templates...`);
-      const templates = await geminiService.generateWelcomeTemplates(count);
+      this.isGenerating = true;
+      logger.info(`Starting batch generation of ${count} welcome templates...`);
 
-      const data: NewWelcomeTemplate[] = templates.map((content) => ({
-        content,
-        embedData: null,
-        usedCount: 0,
-      }));
+      const batches = Math.ceil(count / BATCH_SIZE);
+      let totalGenerated = 0;
 
-      await db.insert(welcomeTemplates).values(data);
-      logger.info(`✅ Generated ${templates.length} welcome templates`);
+      for (let i = 0; i < batches; i++) {
+        const batchCount = Math.min(BATCH_SIZE, count - totalGenerated);
+
+        try {
+          const templates = await geminiService.generateWelcomeTemplates(
+            batchCount
+          );
+
+          const data: NewWelcomeTemplate[] = templates.map((content) => ({
+            content,
+            embedData: null,
+            usedCount: 0,
+          }));
+
+          await db.insert(welcomeTemplates).values(data);
+          totalGenerated += templates.length;
+
+          logger.info(
+            `✅ Batch ${i + 1}/${batches}: Generated ${
+              templates.length
+            } templates (Total: ${totalGenerated}/${count})`
+          );
+
+          if (i < batches - 1) {
+            await this.delay(BATCH_DELAY_MS);
+          }
+        } catch (error) {
+          logger.error(`Failed to generate batch ${i + 1}:`, error);
+          if (i === 0) throw error;
+        }
+      }
+
+      logger.info(
+        `✅ Completed: Generated ${totalGenerated} welcome templates`
+      );
     } catch (error) {
       logger.error("Failed to generate welcome templates:", error);
       throw error;
+    } finally {
+      this.isGenerating = false;
     }
   }
 
@@ -147,17 +195,41 @@ export class TemplateService {
   async generateMorningTemplates(count = 20): Promise<void> {
     const moods: MoodType[] = ["motivational", "chill", "energetic"];
     const perMood = Math.ceil(count / moods.length);
-    const data: NewMorningMessageTemplate[] = [];
+
+    logger.info(`Generating ${count} morning templates in batches...`);
 
     for (const mood of moods) {
-      for (let i = 0; i < perMood; i++) {
-        const content = await geminiService.generateMorningMessage(mood);
-        data.push({ content, moodTag: mood });
+      const batches = Math.ceil(perMood / BATCH_SIZE);
+
+      for (let i = 0; i < batches; i++) {
+        const batchCount = Math.min(BATCH_SIZE, perMood - i * BATCH_SIZE);
+        const data: NewMorningMessageTemplate[] = [];
+
+        for (let j = 0; j < batchCount; j++) {
+          try {
+            const content = await geminiService.generateMorningMessage(mood);
+            data.push({ content, moodTag: mood });
+            await this.delay(1000);
+          } catch (error) {
+            logger.error(
+              `Failed to generate morning template (${mood}):`,
+              error
+            );
+          }
+        }
+
+        if (data.length > 0) {
+          await db.insert(morningMessageTemplates).values(data);
+          logger.info(`✅ Generated ${data.length} ${mood} morning templates`);
+        }
+
+        if (i < batches - 1) {
+          await this.delay(BATCH_DELAY_MS);
+        }
       }
     }
 
-    await db.insert(morningMessageTemplates).values(data);
-    logger.info(`✅ Generated ${data.length} morning message templates`);
+    logger.info("✅ Completed morning template generation");
   }
 
   async getWarningTemplate(type: ViolationType): Promise<NewWarningTemplate> {

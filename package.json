@@ -10,6 +10,7 @@
     "format": "biome format",
     "lint": "biome lint",
     "check": "biome check",
+    "deploy": "tsx src/deploy-commands.ts",
     "drizzle:gen": "pnpm exec drizzle-kit generate --config ./drizzle.config.ts",
     "drizzle:migrate": "pnpm exec drizzle-kit migrate --config ./drizzle.config.ts",
     "drizzle:studio": "pnpm exec drizzle-kit studio --config ./drizzle.config.ts",

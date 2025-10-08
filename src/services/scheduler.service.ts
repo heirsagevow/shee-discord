@@ -17,7 +17,7 @@ type MoodType = "motivational" | "chill" | "energetic";
 const CRON_SCHEDULES = {
   morningCheck: "* * * * *",
   randomChat: "0 * * * *",
-  templateGeneration: "0 3 * * *",
+  templateCheck: "0 */6 * * *",
 } as const;
 
 const RANDOM_CHAT_CHANCE = 0.3;
@@ -25,6 +25,16 @@ const EMBED_COLOR = {
   morning: 0xffd700,
   coffee: 0xe8c5a5,
 } as const;
+
+const TEMPLATE_THRESHOLDS = {
+  welcome: 15,
+  morning: 10,
+};
+
+const TEMPLATE_GENERATION = {
+  welcome: 20,
+  morning: 20,
+};
 
 export class SchedulerService {
   private static instance: SchedulerService;
@@ -54,9 +64,7 @@ export class SchedulerService {
       cron.schedule(CRON_SCHEDULES.randomChat, () => this.checkRandomChat());
     }
 
-    cron.schedule(CRON_SCHEDULES.templateGeneration, () =>
-      this.checkTemplates()
-    );
+    cron.schedule(CRON_SCHEDULES.templateCheck, () => this.checkTemplates());
 
     logger.info("✅ Scheduled jobs started");
   }
@@ -205,14 +213,26 @@ export class SchedulerService {
 
       const stats = await templateService.getTemplateStats();
 
-      if (stats.welcome.total < 20) {
-        logger.info("Generating new welcome templates...");
-        await templateService.generateWelcomeTemplates(50);
+      if (stats.welcome.total < TEMPLATE_THRESHOLDS.welcome) {
+        logger.info(
+          `Low welcome templates (${stats.welcome.total}), generating ${TEMPLATE_GENERATION.welcome} more...`
+        );
+        templateService
+          .generateWelcomeTemplates(TEMPLATE_GENERATION.welcome)
+          .catch((err) =>
+            logger.error("Failed to generate welcome templates:", err)
+          );
       }
 
-      if (stats.morning.total < 15) {
-        logger.info("Generating new morning templates...");
-        await templateService.generateMorningTemplates(20);
+      if (stats.morning.total < TEMPLATE_THRESHOLDS.morning) {
+        logger.info(
+          `Low morning templates (${stats.morning.total}), generating ${TEMPLATE_GENERATION.morning} more...`
+        );
+        templateService
+          .generateMorningTemplates(TEMPLATE_GENERATION.morning)
+          .catch((err) =>
+            logger.error("Failed to generate morning templates:", err)
+          );
       }
 
       logger.info("Template check completed");

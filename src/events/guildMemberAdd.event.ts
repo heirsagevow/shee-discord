@@ -36,7 +36,7 @@ const createWelcomeEmbed = (
 ): EmbedBuilder =>
   new EmbedBuilder()
     .setColor(EMBED_COLOR)
-    .setTitle(`☕ Selamat datang, ${member.displayName}!`)
+    .setTitle(`☕ Welcome, ${member.displayName}!`)
     .setDescription(content)
     .setThumbnail(member.user.displayAvatarURL())
     .setFooter({
@@ -97,6 +97,6 @@ export async function execute(member: GuildMember) {
     await sendWelcomeMessage(member, channel, template.content);
     await assignMemberRole(member);
   } catch (error) {
-    logger.error("Error in guildMemberAdd event:", error);
+    logger.error("Error in welcome event:", error);
   }
 }

@@ -1,4 +1,3 @@
-// src/events/ready.event.ts
 import { Client, ActivityType } from "discord.js";
 import { logger } from "@/utils/logger";
 import { schedulerService } from "@/services/scheduler.service";

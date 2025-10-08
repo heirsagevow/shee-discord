@@ -2,6 +2,10 @@ import type { Message } from "discord.js";
 import { moderationService } from "@/services/moderation.service";
 import { geminiService } from "@/services/gemini.service";
 import { logger } from "@/utils/logger";
+import {
+  getErrorMessageProcessingMessage,
+  getFallbackResponseMessage,
+} from "@/data/messages";
 
 const shouldIgnoreMessage = (message: Message): boolean =>
   message.author.bot || !message.guild;
@@ -24,24 +28,41 @@ const generateAIResponse = async (
     await message.channel.sendTyping();
   }
 
-  const response = await geminiService.generateFriendlyResponse(content);
+  try {
+    const response = await geminiService.generateFriendlyResponse(content);
 
-  await message.reply({
-    content: response,
-    allowedMentions: { repliedUser: true },
-  });
+    // if (!response || response.trim().length === 0) {
+    //   await message.reply({
+    //     content:
+    //       "Maaf, sepertinya aku sedang bingung. Bisa diulang pertanyaannya?",
+    //     allowedMentions: { repliedUser: true },
+    //   });
+    //   return;
+    // }
 
-  logger.info(
-    `AI response sent to ${message.author.tag}: "${content.substring(
-      0,
-      50
-    )}..."`
-  );
+    await message.reply({
+      content: response,
+      allowedMentions: { repliedUser: true },
+    });
+
+    logger.info(
+      `AI response sent to ${message.author.tag}: "${content.substring(
+        0,
+        50
+      )}..."`
+    );
+  } catch (error) {
+    logger.error("Error generating AI response:", error);
+    await message.reply({
+      content: getErrorMessageProcessingMessage(),
+      allowedMentions: { repliedUser: true },
+    });
+  }
 };
 
 const sendFallbackResponse = async (message: Message): Promise<void> => {
   await message.reply({
-    content: "🫖 Maaf ya, Shee lagi agak bingung nih~ Coba tanya lagi nanti?",
+    content: getFallbackResponseMessage(),
   });
 };
 
@@ -96,6 +117,6 @@ export async function execute(message: Message) {
       await handleMention(message);
     }
   } catch (error) {
-    logger.error("Error in messageCreate event:", error);
+    logger.error("Error in message event:", error);
   }
 }

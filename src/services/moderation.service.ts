@@ -11,6 +11,7 @@ import {
   type NewUserWarning,
 } from "@/integrations/drizzle/schemas/discord";
 import { db } from "@/integrations/drizzle/db";
+import { getEscalationMessage } from "@/data/messages";
 
 type ViolationType = "spam" | "badword" | "link";
 type MessageAction = "sent" | "edited" | "deleted";
@@ -219,7 +220,7 @@ export class ModerationService {
   }
 
   private async sendEscalationNotification(member: GuildMember): Promise<void> {
-    const message = `🫖 ${member} sedang diistirahatkan 10 menit untuk menenangkan diri. Take a break and have some tea~ ☕`;
+    const message = getEscalationMessage(member);
     const channel = this.findGeneralChannel(member);
 
     if (channel) {

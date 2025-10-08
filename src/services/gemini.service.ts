@@ -1,11 +1,19 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { logger } from "@/utils/logger";
 import { cfg } from "@/utils/config";
+import {
+  generateFriendlyResponsePrompt,
+  generateMorningMessagePrompt,
+  generateRandomChatPrompt,
+  generateWarningMessagePrompt,
+  generateWelcomeTemplatesPrompt,
+} from "@/data/prompts";
 
 type MoodType = "motivational" | "chill" | "energetic";
 type ViolationType = "spam" | "badword" | "link";
 
-const RATE_LIMIT_DURATION_MS = 60 * 60 * 1000;
+const RATE_LIMIT_DURATION_MS = 60 * 1000; // 1 minute
+const MAX_REQUESTS_PER_MINUTE = 15;
 const MODEL_NAME = "gemini-2.5-flash";
 
 const DEFAULT_GENERATION_CONFIG = {
@@ -13,11 +21,15 @@ const DEFAULT_GENERATION_CONFIG = {
   maxOutputTokens: 200,
 };
 
+type KeyUsageWindow = {
+  timestamps: number[];
+  rateLimitedUntil: number;
+};
+
 export class GeminiService {
   private static instance: GeminiService;
   private currentKeyIndex = 0;
-  private keyUsageCount = new Map<number, number>();
-  private keyRateLimitUntil = new Map<number, number>();
+  private keyUsageWindows = new Map<number, KeyUsageWindow>();
 
   private constructor() {
     this.initializeKeyTracking();
@@ -33,20 +45,45 @@ export class GeminiService {
 
   private initializeKeyTracking(): void {
     cfg.GEMINI_API_KEYS.forEach((_, index) => {
-      this.keyUsageCount.set(index, 0);
+      this.keyUsageWindows.set(index, {
+        timestamps: [],
+        rateLimitedUntil: 0,
+      });
     });
   }
 
-  private isKeyAvailable(index: number): boolean {
-    const rateLimitUntil = this.keyRateLimitUntil.get(index) || 0;
-    return rateLimitUntil < Date.now();
+  private cleanOldTimestamps(window: KeyUsageWindow): void {
+    const oneMinuteAgo = Date.now() - RATE_LIMIT_DURATION_MS;
+    window.timestamps = window.timestamps.filter((ts) => ts > oneMinuteAgo);
   }
 
-  private incrementKeyUsage(index: number): void {
-    const currentUsage = this.keyUsageCount.get(index) || 0;
-    this.keyUsageCount.set(index, currentUsage + 1);
+  private isKeyAvailable(index: number): boolean {
+    const window = this.keyUsageWindows.get(index);
+    if (!window) return false;
+
+    // Check if manually rate limited
+    if (window.rateLimitedUntil > Date.now()) {
+      return false;
+    }
+
+    // Clean old timestamps
+    this.cleanOldTimestamps(window);
+
+    // Check if under rate limit
+    return window.timestamps.length < MAX_REQUESTS_PER_MINUTE;
+  }
+
+  private recordKeyUsage(index: number): void {
+    const window = this.keyUsageWindows.get(index);
+    if (!window) return;
+
+    this.cleanOldTimestamps(window);
+    window.timestamps.push(Date.now());
+
     logger.debug(
-      `Using Gemini API key #${index + 1}, usage: ${currentUsage + 1}`
+      `Using Gemini API key #${index + 1}, requests in last minute: ${
+        window.timestamps.length
+      }/${MAX_REQUESTS_PER_MINUTE}`
     );
   }
 
@@ -58,24 +95,31 @@ export class GeminiService {
 
       if (this.isKeyAvailable(index)) {
         const key = cfg.GEMINI_API_KEYS[index];
-        this.incrementKeyUsage(index);
+        this.recordKeyUsage(index);
         this.currentKeyIndex =
           (this.currentKeyIndex + 1) % cfg.GEMINI_API_KEYS.length;
         return key;
       }
 
+      logger.debug(`API key #${index + 1} is not available, trying next...`);
       this.currentKeyIndex =
         (this.currentKeyIndex + 1) % cfg.GEMINI_API_KEYS.length;
     }
 
-    throw new Error("All Gemini API keys are rate limited. Please wait.");
+    throw new Error(
+      "All Gemini API keys have reached rate limit (15 requests/minute). Please wait."
+    );
   }
 
   private markKeyAsRateLimited(keyIndex: number): void {
+    const window = this.keyUsageWindows.get(keyIndex);
+    if (!window) return;
+
     const resetTime = Date.now() + RATE_LIMIT_DURATION_MS;
-    this.keyRateLimitUntil.set(keyIndex, resetTime);
+    window.rateLimitedUntil = resetTime;
+
     logger.warn(
-      `API key #${keyIndex + 1} rate limited until ${new Date(
+      `API key #${keyIndex + 1} manually rate limited until ${new Date(
         resetTime
       ).toISOString()}`
     );
@@ -137,22 +181,7 @@ export class GeminiService {
   }
 
   async generateWelcomeTemplates(count = 50): Promise<string[]> {
-    const prompt = `
-      Generate ${count} unique, warm, and friendly welcome messages in Bahasa Indonesia for new Discord members. 
-
-      Requirements:
-      - Be casual, inviting, and natural
-      - Use coffee/tea metaphors occasionally (☕🍵)
-      - Mix formal and informal tones
-      - Include some with emojis, some without
-      - 1-2 sentences each
-      - Vary the energy level (excited, calm, cozy, supportive)
-
-      Format: Return ONLY a JSON array of strings, no other text.
-
-      Example format:
-      ["message1", "message2", "message3"]
-    `;
+    const prompt = generateWelcomeTemplatesPrompt(count);
 
     const response = await this.generate(prompt, {
       temperature: 0.9,
@@ -178,17 +207,7 @@ export class GeminiService {
       energetic: "exciting and energetic, ready to conquer the day",
     };
 
-    const prompt = `
-      Generate a single morning greeting message in Bahasa Indonesia that is ${moodDescriptions[mood]}.
-
-      Requirements:
-      - 1-2 sentences max
-      - Natural and warm tone
-      - Include a morning emoji (☀️🌅🌄)
-      - Make it feel personal and genuine
-
-      Return ONLY the message text, no quotes or extra formatting.
-    `;
+    const prompt = generateMorningMessagePrompt(moodDescriptions[mood]);
 
     return this.generate(prompt, { temperature: 0.85, maxTokens: 150 });
   }
@@ -197,23 +216,7 @@ export class GeminiService {
     question: string,
     context?: string
   ): Promise<string> {
-    const prompt = `
-      Kamu adalah Shee, seorang teman yang hangat, ramah, perhatian, dan ceria di Discord server.
-      Personality: friendly, supportive, gentle, loves coffee/tea, uses emojis naturally.
-
-      ${context ? `Context: ${context}` : ""}
-
-      Seseorang bertanya atau mengatakan: "${question}"
-
-      Respond naturally in Bahasa Indonesia:
-      - Be helpful and genuine
-      - Keep it 1-3 sentences
-      - Use 1-2 emojis if appropriate
-      - Show warmth and care
-
-      Return ONLY your response, no quotes or labels.
-    `;
-
+    const prompt = generateFriendlyResponsePrompt(question, context);
     return this.generate(prompt, { temperature: 0.8, maxTokens: 200 });
   }
 
@@ -229,20 +232,7 @@ export class GeminiService {
 
     const topic = topics[Math.floor(Math.random() * topics.length)];
 
-    const prompt = `
-      Generate a spontaneous, casual message from Shee to a Discord community in Bahasa Indonesia.
-
-      Topic: ${topic}
-
-      Requirements:
-      - Very short (1 sentence max)
-      - Natural and conversational
-      - Include relevant emoji
-      - Feel authentic, not forced
-      - Friendly and warm tone
-
-      Return ONLY the message text.
-    `;
+    const prompt = generateRandomChatPrompt(topic);
 
     return this.generate(prompt, { temperature: 0.95, maxTokens: 100 });
   }
@@ -257,31 +247,40 @@ export class GeminiService {
       link: "sharing unauthorized links",
     };
 
-    const prompt = `
-      Generate a gentle but firm warning message in Bahasa Indonesia for a user who is ${violationDescriptions[type]}.
-
-      User: ${userName}
-
-      Tone: warm and understanding, but clear about the rules
-      - Don't be harsh or angry
-      - Use a friendly reminder approach
-      - Include a tea/coffee metaphor if natural
-      - Keep it 1-2 sentences
-      - Encourage better behavior
-
-      Return ONLY the warning message.
-    `;
+    const prompt = generateWarningMessagePrompt(
+      userName,
+      violationDescriptions[type]
+    );
 
     return this.generate(prompt, { temperature: 0.7, maxTokens: 150 });
   }
 
   getUsageStats() {
     const now = Date.now();
-    return cfg.GEMINI_API_KEYS.map((_, index) => ({
-      keyIndex: index + 1,
-      usageCount: this.keyUsageCount.get(index) || 0,
-      rateLimited: (this.keyRateLimitUntil.get(index) || 0) > now,
-    }));
+    return cfg.GEMINI_API_KEYS.map((_, index) => {
+      const window = this.keyUsageWindows.get(index);
+      if (!window) {
+        return {
+          keyIndex: index + 1,
+          requestsInLastMinute: 0,
+          rateLimited: false,
+          availableSlots: MAX_REQUESTS_PER_MINUTE,
+        };
+      }
+
+      this.cleanOldTimestamps(window);
+
+      return {
+        keyIndex: index + 1,
+        requestsInLastMinute: window.timestamps.length,
+        rateLimited: window.rateLimitedUntil > now,
+        availableSlots: MAX_REQUESTS_PER_MINUTE - window.timestamps.length,
+        rateLimitedUntil:
+          window.rateLimitedUntil > now
+            ? new Date(window.rateLimitedUntil).toISOString()
+            : null,
+      };
+    });
   }
 }
 
