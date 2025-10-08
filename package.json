@@ -1,13 +1,46 @@
 {
   "name": "shee-discord",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "The Soft Guardian - A warm and friendly Discord bot",
+  "main": "dist/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "format": "biome format",
+    "lint": "biome lint",
+    "check": "biome check",
+    "drizzle:gen": "pnpm exec drizzle-kit generate --config ./drizzle.config.ts",
+    "drizzle:migrate": "pnpm exec drizzle-kit migrate --config ./drizzle.config.ts",
+    "drizzle:studio": "pnpm exec drizzle-kit studio --config ./drizzle.config.ts",
+    "drizzle:seed": "tsx ./src/integrations/drizzle/seeder.ts"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "packageManager": "pnpm@10.13.1"
+  "keywords": [
+    "discord",
+    "bot",
+    "shee"
+  ],
+  "author": "nsrvel",
+  "license": "MIT",
+  "dependencies": {
+    "@google/generative-ai": "^0.2.1",
+    "@t3-oss/env-core": "^0.13.8",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.6.1",
+    "drizzle-orm": "^0.44.6",
+    "ioredis": "^5.3.2",
+    "node-cron": "^3.0.3",
+    "pg": "^8.16.3",
+    "redis": "^5.8.3",
+    "winston": "^3.11.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.5",
+    "@types/node-cron": "^3.0.11",
+    "@types/pg": "^8.15.5",
+    "drizzle-kit": "^0.31.5",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
 }
