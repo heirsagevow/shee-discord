@@ -1,18 +1,24 @@
+// src/events/ready.event.ts
 import { Client, ActivityType } from "discord.js";
-import { logger } from "../utils/logger";
-import { schedulerService } from "../services/scheduler.service";
-import { templateService } from "../services/template.service";
+import { logger } from "@/utils/logger";
+import { schedulerService } from "@/services/scheduler.service";
+import { templateService } from "@/services/template.service";
 
 export const once = true;
 
-export async function execute(client: Client) {
-  if (!client.user) return;
+const MIN_TEMPLATE_THRESHOLDS = {
+  welcome: 20,
+  morning: 10,
+  warning: 0,
+} as const;
 
-  logger.info(`✅ Shee bot is ready! Logged in as ${client.user.tag}`);
-  logger.info(`📊 Serving ${client.guilds.cache.size} guilds`);
+const GENERATION_COUNTS = {
+  welcome: 50,
+  morning: 20,
+} as const;
 
-  // Set bot status
-  client.user.setPresence({
+const setBotStatus = (client: Client) => {
+  client.user?.setPresence({
     activities: [
       {
         name: "coffee brewing ☕",
@@ -21,35 +27,65 @@ export async function execute(client: Client) {
     ],
     status: "online",
   });
+};
 
-  // Initialize scheduler
-  schedulerService.initialize(client);
+const logStartupInfo = (client: Client) => {
+  logger.info(`✅ Shee bot is ready! Logged in as ${client.user?.tag}`);
+  logger.info(`📊 Serving ${client.guilds.cache.size} guilds`);
+};
 
-  // Check template inventory on startup
+const shouldGenerateTemplates = (count: number, threshold: number): boolean =>
+  count < threshold;
+
+const generateInitialTemplates = async (stats: {
+  welcome: { total: number };
+  morning: { total: number };
+  warning: { total: number };
+}) => {
+  if (
+    shouldGenerateTemplates(
+      stats.welcome.total,
+      MIN_TEMPLATE_THRESHOLDS.welcome
+    )
+  ) {
+    logger.info("Generating initial welcome templates...");
+    await templateService.generateWelcomeTemplates(GENERATION_COUNTS.welcome);
+  }
+
+  if (
+    shouldGenerateTemplates(
+      stats.morning.total,
+      MIN_TEMPLATE_THRESHOLDS.morning
+    )
+  ) {
+    logger.info("Generating initial morning templates...");
+    await templateService.generateMorningTemplates(GENERATION_COUNTS.morning);
+  }
+
+  if (stats.warning.total === MIN_TEMPLATE_THRESHOLDS.warning) {
+    logger.info("Seeding warning templates...");
+    await templateService.seedDefaultWarningTemplates();
+  }
+};
+
+const initializeTemplates = async () => {
   try {
     const stats = await templateService.getTemplateStats();
     logger.info("📝 Template Stats:", stats);
-
-    // Generate initial templates if needed
-    if (stats.welcome.total < 20) {
-      logger.info("Generating initial welcome templates...");
-      await templateService.generateWelcomeTemplates(50);
-    }
-
-    if (stats.morning.total < 10) {
-      logger.info("Generating initial morning templates...");
-      await templateService.generateMorningTemplates(20);
-    }
-
-    if (stats.warning.total === 0) {
-      logger.info("Seeding warning templates...");
-      await templateService.seedDefaultWarningTemplates();
-    }
+    await generateInitialTemplates(stats);
   } catch (error) {
     logger.error("Error checking templates on startup:", error);
   }
+};
 
-  // Log ready timestamp
+export async function execute(client: Client) {
+  if (!client.user) return;
+
+  logStartupInfo(client);
+  setBotStatus(client);
+  schedulerService.initialize(client);
+  await initializeTemplates();
+
   logger.info(
     `🚀 Shee is now fully operational at ${new Date().toISOString()}`
   );

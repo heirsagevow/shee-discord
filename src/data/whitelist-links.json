@@ -1,0 +1,63 @@
+{
+  "social_media": [
+    "youtube.com",
+    "youtu.be",
+    "twitter.com",
+    "x.com",
+    "instagram.com",
+    "facebook.com",
+    "fb.com",
+    "tiktok.com",
+    "linkedin.com",
+    "threads.net"
+  ],
+  "discord": ["discord.gg", "discord.com", "discordapp.com"],
+  "streaming": ["twitch.tv", "kick.com", "vimeo.com", "dailymotion.com"],
+  "development": [
+    "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "stackoverflow.com",
+    "stackexchange.com",
+    "npmjs.com",
+    "pypi.org"
+  ],
+  "media": [
+    "imgur.com",
+    "giphy.com",
+    "tenor.com",
+    "gfycat.com",
+    "spotify.com",
+    "soundcloud.com"
+  ],
+  "documentation": [
+    "docs.google.com",
+    "drive.google.com",
+    "notion.so",
+    "notion.site",
+    "medium.com",
+    "dev.to",
+    "hashnode.dev"
+  ],
+  "gaming": [
+    "steamcommunity.com",
+    "store.steampowered.com",
+    "epicgames.com",
+    "riotgames.com",
+    "playstation.com",
+    "xbox.com"
+  ],
+  "design": ["figma.com", "dribbble.com", "behance.net", "canva.com"],
+  "trusted": ["wikipedia.org", "reddit.com", "quora.com"],
+  "descriptions": {
+    "social_media": "Platform media sosial yang umum digunakan",
+    "discord": "Domain resmi Discord",
+    "streaming": "Platform streaming video/live",
+    "development": "Platform development dan coding",
+    "media": "Platform sharing media (gambar, gif, musik)",
+    "documentation": "Platform dokumentasi dan file sharing",
+    "gaming": "Platform gaming yang trusted",
+    "design": "Platform design dan creative",
+    "trusted": "Website trusted lainnya"
+  }
+}

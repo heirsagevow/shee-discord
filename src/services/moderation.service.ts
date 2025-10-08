@@ -1,8 +1,9 @@
 import { Message, GuildMember, TextChannel } from "discord.js";
-import { logger } from "../utils/logger";
+import { logger } from "@/utils/logger";
 import { templateService } from "./template.service";
 import { and, eq, gte, count } from "drizzle-orm";
 import { cache } from "@/utils/cache";
+import { dataLoader } from "@/utils/data-loader";
 import {
   messageLogs,
   userWarnings,
@@ -11,27 +12,22 @@ import {
 } from "@/integrations/drizzle/schemas/discord";
 import { db } from "@/integrations/drizzle/db";
 
+type ViolationType = "spam" | "badword" | "link";
+type MessageAction = "sent" | "edited" | "deleted";
+
+const SPAM_CONFIG = {
+  messageLimit: 5,
+  timeWindowSeconds: 10,
+} as const;
+
+const MODERATION_CONFIG = {
+  warningThreshold: 3,
+  timeoutDurationMs: 10 * 60 * 1000,
+  warningWindowDays: 7,
+} as const;
+
 export class ModerationService {
   private static instance: ModerationService;
-
-  // Configurable thresholds
-  private readonly SPAM_MESSAGE_LIMIT = 5;
-  private readonly SPAM_TIME_WINDOW = 10; // seconds
-  private readonly WARNING_THRESHOLD = 3; // escalate after 3 warnings
-
-  // Simple badword list (should be loaded from DB in production)
-  private badwords = [
-    "anjing",
-    "kontol",
-    "memek",
-    "bangsat",
-    "tolol",
-    "babi",
-    "kampret",
-    "jancok",
-    "tai",
-    "fuck",
-  ];
 
   private constructor() {}
 
@@ -42,63 +38,68 @@ export class ModerationService {
     return ModerationService.instance;
   }
 
-  /**
-   * Check if message is spam
-   */
-  async checkSpam(message: Message): Promise<boolean> {
-    const key = `spam:${message.guildId}:${message.author.id}`;
-    const count = await cache.increment(key, this.SPAM_TIME_WINDOW);
+  private createSpamCacheKey(guildId: string, userId: string): string {
+    return `spam:${guildId}:${userId}`;
+  }
 
-    if (count > this.SPAM_MESSAGE_LIMIT) {
+  private extractUrls(content: string): string[] | null {
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    return content.match(urlRegex);
+  }
+
+  private hasUnauthorizedUrls(urls: string[]): boolean {
+    return urls.some((url) => !dataLoader.isUrlWhitelisted(url));
+  }
+
+  async checkSpam(message: Message): Promise<boolean> {
+    const key = this.createSpamCacheKey(message.guildId!, message.author.id);
+    const messageCount = await cache.increment(
+      key,
+      SPAM_CONFIG.timeWindowSeconds
+    );
+
+    const isSpam = messageCount > SPAM_CONFIG.messageLimit;
+
+    if (isSpam) {
       logger.warn(`Spam detected from ${message.author.tag}`);
-      return true;
     }
 
-    return false;
+    return isSpam;
   }
 
-  /**
-   * Check if message contains badwords
-   */
   checkBadwords(content: string): boolean {
-    const lowerContent = content.toLowerCase();
-    return this.badwords.some((word) => lowerContent.includes(word));
+    return dataLoader.containsBadword(content);
   }
 
-  /**
-   * Check if message contains unauthorized links
-   */
-  checkUnauthorizedLinks(content: string, whitelist: string[] = []): boolean {
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
-    const urls = content.match(urlRegex);
-
+  checkUnauthorizedLinks(content: string): boolean {
+    const urls = this.extractUrls(content);
     if (!urls) return false;
-
-    // Check if any URL is not in whitelist
-    return urls.some((url) => {
-      return !whitelist.some((domain) => url.includes(domain));
-    });
+    return this.hasUnauthorizedUrls(urls);
   }
 
-  /**
-   * Handle spam violation
-   */
+  private async shouldEscalateToHeez(
+    userId: string,
+    guildId: string
+  ): Promise<{ shouldEscalate: boolean; warningCount: number }> {
+    const warningCount = await this.getWarningCount(userId, guildId);
+    return {
+      shouldEscalate: warningCount >= MODERATION_CONFIG.warningThreshold,
+      warningCount,
+    };
+  }
+
   async handleSpam(message: Message): Promise<void> {
     try {
-      // Delete message
       await message.delete();
 
-      // Get warning count
-      const warningCount = await this.getWarningCount(
+      const { shouldEscalate, warningCount } = await this.shouldEscalateToHeez(
         message.author.id,
         message.guildId!
       );
 
-      if (warningCount >= this.WARNING_THRESHOLD) {
-        // Escalate to Hee'z (timeout)
+      if (shouldEscalate) {
         await this.escalateToHeez(message.member!, "spam", warningCount);
       } else {
-        // Soft warning from Shee
         await this.sendSoftWarning(message, "spam");
         await this.recordWarning(message.author.id, message.guildId!, "spam");
       }
@@ -107,21 +108,16 @@ export class ModerationService {
     }
   }
 
-  /**
-   * Handle badword violation
-   */
   async handleBadword(message: Message): Promise<void> {
     try {
-      // Delete message
       await message.delete();
 
-      // Get warning count
-      const warningCount = await this.getWarningCount(
+      const { shouldEscalate, warningCount } = await this.shouldEscalateToHeez(
         message.author.id,
         message.guildId!
       );
 
-      if (warningCount >= this.WARNING_THRESHOLD) {
+      if (shouldEscalate) {
         await this.escalateToHeez(message.member!, "badword", warningCount);
       } else {
         await this.sendSoftWarning(message, "badword");
@@ -136,27 +132,19 @@ export class ModerationService {
     }
   }
 
-  /**
-   * Handle unauthorized link
-   */
   async handleUnauthorizedLink(message: Message): Promise<void> {
     try {
       await message.delete();
       await this.sendSoftWarning(message, "link");
-
-      // Link violations don't count as warnings (just info)
       logger.info(`Removed unauthorized link from ${message.author.tag}`);
     } catch (error) {
       logger.error("Error handling link:", error);
     }
   }
 
-  /**
-   * Send soft warning using template
-   */
   private async sendSoftWarning(
     message: Message,
-    type: "spam" | "badword" | "link"
+    type: ViolationType
   ): Promise<void> {
     const template = await templateService.getWarningTemplate(type);
 
@@ -170,15 +158,14 @@ export class ModerationService {
       `<@${message.author.id}>`
     );
 
-    await message.channel.send({
-      content: warningMessage,
-      allowedMentions: { users: [message.author.id] },
-    });
+    if (message.channel.isTextBased() && !message.channel.isDMBased()) {
+      await message.channel.send({
+        content: warningMessage,
+        allowedMentions: { users: [message.author.id] },
+      });
+    }
   }
 
-  /**
-   * Record warning in database
-   */
   private async recordWarning(
     userId: string,
     guildId: string,
@@ -198,14 +185,16 @@ export class ModerationService {
     );
   }
 
-  /**
-   * Get warning count for user
-   */
+  private getWarningWindowDate(): Date {
+    const daysAgo = MODERATION_CONFIG.warningWindowDays;
+    return new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
+  }
+
   private async getWarningCount(
     userId: string,
     guildId: string
   ): Promise<number> {
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const windowDate = this.getWarningWindowDate();
 
     const [result] = await db
       .select({ value: count() })
@@ -215,50 +204,58 @@ export class ModerationService {
           eq(userWarnings.userId, userId),
           eq(userWarnings.guildId, guildId),
           eq(userWarnings.warnedBy, "shee"),
-          gte(userWarnings.createdAt, sevenDaysAgo)
+          gte(userWarnings.createdAt, windowDate)
         )
       );
 
     return result.value;
   }
 
-  /**
-   * Escalate to Hee'z for heavier moderation
-   */
+  private findGeneralChannel(member: GuildMember): TextChannel | undefined {
+    const channel = member.guild.channels.cache.find(
+      (ch) => ch.isTextBased() && !ch.isDMBased() && ch.name.includes("general")
+    );
+    return channel as TextChannel | undefined;
+  }
+
+  private async sendEscalationNotification(member: GuildMember): Promise<void> {
+    const message = `🫖 ${member} sedang diistirahatkan 10 menit untuk menenangkan diri. Take a break and have some tea~ ☕`;
+    const channel = this.findGeneralChannel(member);
+
+    if (channel) {
+      await channel.send(message);
+    }
+  }
+
+  private async recordEscalation(
+    member: GuildMember,
+    reason: string
+  ): Promise<void> {
+    const warning: NewUserWarning = {
+      userId: member.id,
+      guildId: member.guild.id,
+      warnedBy: "heez",
+      reason: `Escalated from Shee: ${reason}`,
+      severity: 3,
+    };
+
+    await db.insert(userWarnings).values(warning);
+  }
+
   private async escalateToHeez(
     member: GuildMember,
     reason: string,
     warningCount: number
   ): Promise<void> {
     try {
-      // Timeout user for 10 minutes
       await member.timeout(
-        10 * 60 * 1000,
+        MODERATION_CONFIG.timeoutDurationMs,
         `Escalated from Shee: ${reason} (${warningCount} warnings)`
       );
 
-      // Send notification to channel
-      const message = `🫖 ${member} sedang diistirahatkan 10 menit untuk menenangkan diri. Take a break and have some tea~ ☕`;
+      await this.sendEscalationNotification(member);
+      await this.recordEscalation(member, reason);
 
-      // Find a suitable channel to send notification
-      const channel = member.guild.channels.cache.find(
-        (ch) => ch.isTextBased() && ch.name.includes("general")
-      ) as TextChannel;
-
-      if (channel) {
-        await channel.send(message);
-      }
-
-      // Record escalation
-      const warning: NewUserWarning = {
-        userId: member.id,
-        guildId: member.guild.id,
-        warnedBy: "heez",
-        reason: `Escalated from Shee: ${reason}`,
-        severity: 3,
-      };
-
-      await db.insert(userWarnings).values(warning);
       logger.warn(
         `Escalated user ${member.user.tag} to Hee'z (${warningCount} warnings)`
       );
@@ -267,12 +264,9 @@ export class ModerationService {
     }
   }
 
-  /**
-   * Log message action to database
-   */
   async logMessageAction(
     message: Message,
-    action: "sent" | "edited" | "deleted"
+    action: MessageAction
   ): Promise<void> {
     try {
       const log: NewMessageLog = {
@@ -287,7 +281,7 @@ export class ModerationService {
 
       await db.insert(messageLogs).values(log);
     } catch (error) {
-      // Don't log errors for message logging to avoid spam
+      // Silent fail to avoid log spam
     }
   }
 }

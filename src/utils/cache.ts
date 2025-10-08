@@ -1,13 +1,17 @@
 import { redis } from "@/integrations/redis";
 import { logger } from "./logger";
 
+const handleRedisError = (operation: string, error: unknown): void => {
+  logger.error(`Redis ${operation} error:`, error);
+};
+
 export const cache = {
   async get(key: string): Promise<string | null> {
     if (!redis) return null;
     try {
       return await redis.get(key);
     } catch (error) {
-      logger.error("Redis GET error:", error);
+      handleRedisError("GET", error);
       return null;
     }
   },
@@ -22,7 +26,7 @@ export const cache = {
       }
       return true;
     } catch (error) {
-      logger.error("Redis SET error:", error);
+      handleRedisError("SET", error);
       return false;
     }
   },
@@ -33,7 +37,7 @@ export const cache = {
       await redis.del(key);
       return true;
     } catch (error) {
-      logger.error("Redis DEL error:", error);
+      handleRedisError("DEL", error);
       return false;
     }
   },
@@ -42,12 +46,14 @@ export const cache = {
     if (!redis) return 0;
     try {
       const count = await redis.incr(key);
-      if (ttlSeconds && count === 1) {
+      const isFirstIncrement = count === 1;
+
+      if (ttlSeconds && isFirstIncrement) {
         await redis.expire(key, ttlSeconds);
       }
       return count;
     } catch (error) {
-      logger.error("Redis INCR error:", error);
+      handleRedisError("INCR", error);
       return 0;
     }
   },

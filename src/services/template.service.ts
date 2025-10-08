@@ -6,10 +6,16 @@ import {
   type NewWarningTemplate,
   type NewWelcomeTemplate,
 } from "@/integrations/drizzle/schemas/discord";
-import { logger } from "../utils/logger";
+import { logger } from "@/utils/logger";
 import { sql, asc, count, lt } from "drizzle-orm";
 import { db } from "@/integrations/drizzle/db";
 import { geminiService } from "./gemini.service";
+
+type MoodType = "motivational" | "chill" | "energetic";
+type ViolationType = "spam" | "badword" | "link";
+
+const LOW_TEMPLATE_THRESHOLD = 10;
+const USAGE_THRESHOLD = 5;
 
 export class TemplateService {
   private static instance: TemplateService;
@@ -23,22 +29,25 @@ export class TemplateService {
     return TemplateService.instance;
   }
 
-  /**
-   * Get the least used welcome template
-   */
-  async getWelcomeTemplate() {
-    // Check if we need to generate more templates
-    const [{ value: availableCount }] = await db
+  private async getAvailableTemplateCount(): Promise<number> {
+    const [{ value }] = await db
       .select({ value: count() })
       .from(welcomeTemplates)
-      .where(lt(welcomeTemplates.usedCount, 5));
+      .where(lt(welcomeTemplates.usedCount, USAGE_THRESHOLD));
 
-    if (availableCount < 10) {
+    return value;
+  }
+
+  private async checkAndGenerateTemplatesIfNeeded(): Promise<void> {
+    const availableCount = await this.getAvailableTemplateCount();
+
+    if (availableCount < LOW_TEMPLATE_THRESHOLD) {
       logger.info("Low template count, triggering generation...");
       await this.generateWelcomeTemplates();
     }
+  }
 
-    // Get least used template
+  private async getLeastUsedTemplate() {
     const [template] = await db
       .select()
       .from(welcomeTemplates)
@@ -52,22 +61,27 @@ export class TemplateService {
       throw new Error("No welcome templates available");
     }
 
-    // Update usage stats
+    return template;
+  }
+
+  private async markTemplateAsUsed(templateId: number): Promise<void> {
     await db
       .update(welcomeTemplates)
       .set({
         usedCount: sql`${welcomeTemplates.usedCount} + 1`,
         lastUsedAt: new Date(),
       })
-      .where(sql`${welcomeTemplates.id} = ${template.id}`);
+      .where(sql`${welcomeTemplates.id} = ${templateId}`);
+  }
 
+  async getWelcomeTemplate() {
+    await this.checkAndGenerateTemplatesIfNeeded();
+    const template = await this.getLeastUsedTemplate();
+    await this.markTemplateAsUsed(template.id);
     return template;
   }
 
-  /**
-   * Generate new welcome templates using AI
-   */
-  async generateWelcomeTemplates(count: number = 50): Promise<void> {
+  async generateWelcomeTemplates(count = 50): Promise<void> {
     try {
       logger.info(`Generating ${count} welcome templates...`);
       const templates = await geminiService.generateWelcomeTemplates(count);
@@ -86,12 +100,7 @@ export class TemplateService {
     }
   }
 
-  /**
-   * Get morning message template
-   */
-  async getMorningMessageTemplate(
-    mood?: "motivational" | "chill" | "energetic"
-  ) {
+  private async findMorningTemplate(mood?: MoodType) {
     const query = db
       .select()
       .from(morningMessageTemplates)
@@ -105,35 +114,38 @@ export class TemplateService {
       ? await query.where(sql`${morningMessageTemplates.moodTag} = ${mood}`)
       : await query;
 
-    if (!template) {
-      // Generate on-the-fly if no templates available
-      logger.info("No morning template found, generating on-the-fly");
-      const content = await geminiService.generateMorningMessage(mood);
-      return { content };
-    }
+    return template;
+  }
 
-    // Update usage
+  private async generateMorningMessageOnTheFly(mood?: MoodType) {
+    logger.info("No morning template found, generating on-the-fly");
+    const content = await geminiService.generateMorningMessage(mood);
+    return { content };
+  }
+
+  private async markMorningTemplateAsUsed(templateId: number): Promise<void> {
     await db
       .update(morningMessageTemplates)
       .set({
         usedCount: sql`${morningMessageTemplates.usedCount} + 1`,
         lastUsedAt: new Date(),
       })
-      .where(sql`${morningMessageTemplates.id} = ${template.id}`);
+      .where(sql`${morningMessageTemplates.id} = ${templateId}`);
+  }
 
+  async getMorningMessageTemplate(mood?: MoodType) {
+    const template = await this.findMorningTemplate(mood);
+
+    if (!template) {
+      return this.generateMorningMessageOnTheFly(mood);
+    }
+
+    await this.markMorningTemplateAsUsed(template.id);
     return template;
   }
 
-  /**
-   * Generate morning message templates in batch
-   */
-  async generateMorningTemplates(count: number = 20): Promise<void> {
-    const moods: Array<"motivational" | "chill" | "energetic"> = [
-      "motivational",
-      "chill",
-      "energetic",
-    ];
-
+  async generateMorningTemplates(count = 20): Promise<void> {
+    const moods: MoodType[] = ["motivational", "chill", "energetic"];
     const perMood = Math.ceil(count / moods.length);
     const data: NewMorningMessageTemplate[] = [];
 
@@ -148,12 +160,7 @@ export class TemplateService {
     logger.info(`✅ Generated ${data.length} morning message templates`);
   }
 
-  /**
-   * Get warning template
-   */
-  async getWarningTemplate(
-    type: "spam" | "badword" | "link"
-  ): Promise<NewWarningTemplate> {
+  async getWarningTemplate(type: ViolationType): Promise<NewWarningTemplate> {
     const [template] = await db
       .select()
       .from(warningTemplates)
@@ -161,7 +168,6 @@ export class TemplateService {
       .limit(1);
 
     if (!template) {
-      // Seed defaults if not exists
       await this.seedDefaultWarningTemplates();
       return this.getWarningTemplate(type);
     }
@@ -169,9 +175,6 @@ export class TemplateService {
     return template;
   }
 
-  /**
-   * Seed default warning templates
-   */
   async seedDefaultWarningTemplates(): Promise<void> {
     const defaults: NewWarningTemplate[] = [
       {
@@ -216,9 +219,16 @@ export class TemplateService {
     logger.info("✅ Seeded default warning templates");
   }
 
-  /**
-   * Get template statistics
-   */
+  private async getTotalUsageCount(): Promise<number> {
+    const [result] = await db
+      .select({
+        value: sql<number>`COALESCE(SUM(${welcomeTemplates.usedCount}), 0)`,
+      })
+      .from(welcomeTemplates);
+
+    return result.value;
+  }
+
   async getTemplateStats() {
     const [welcomeCountResult] = await db
       .select({ value: count() })
@@ -232,16 +242,12 @@ export class TemplateService {
       .select({ value: count() })
       .from(warningTemplates);
 
-    const [totalWelcomeUsageResult] = await db
-      .select({
-        value: sql<number>`COALESCE(SUM(${welcomeTemplates.usedCount}), 0)`,
-      })
-      .from(welcomeTemplates);
+    const totalUsage = await this.getTotalUsageCount();
 
     return {
       welcome: {
         total: welcomeCountResult.value,
-        totalUsage: totalWelcomeUsageResult.value,
+        totalUsage,
       },
       morning: {
         total: morningCountResult.value,

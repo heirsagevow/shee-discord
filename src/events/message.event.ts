@@ -1,92 +1,101 @@
-import { Message } from "discord.js";
-import { moderationService } from "../services/moderation.service";
-import { geminiService } from "../services/gemini.service";
-import { logger } from "../utils/logger";
+import type { Message } from "discord.js";
+import { moderationService } from "@/services/moderation.service";
+import { geminiService } from "@/services/gemini.service";
+import { logger } from "@/utils/logger";
 
-export async function execute(message: Message) {
-  // Ignore bots and DMs
-  if (message.author.bot || !message.guild) return;
+const shouldIgnoreMessage = (message: Message): boolean =>
+  message.author.bot || !message.guild;
 
-  try {
-    // === Moderation Checks ===
+const isBotMentioned = (message: Message): boolean =>
+  message.mentions.has(message.client.user!.id);
 
-    // Check for spam
-    const isSpam = await moderationService.checkSpam(message);
-    if (isSpam) {
-      await moderationService.handleSpam(message);
-      return;
-    }
+const extractContentWithoutMentions = (content: string): string =>
+  content.replace(/<@!?\d+>/g, "").trim();
 
-    // Check for badwords
-    const hasBadword = moderationService.checkBadwords(message.content);
-    if (hasBadword) {
-      await moderationService.handleBadword(message);
-      return;
-    }
+const sendDefaultGreeting = async (message: Message): Promise<void> => {
+  await message.reply("☕ Iya? Ada yang bisa Shee bantu? 💚");
+};
 
-    // Check for unauthorized links
-    const hasUnauthorizedLink = moderationService.checkUnauthorizedLinks(
-      message.content,
-      ["youtube.com", "youtu.be", "discord.gg", "twitter.com", "x.com"] // Basic whitelist
-    );
-    if (hasUnauthorizedLink) {
-      await moderationService.handleUnauthorizedLink(message);
-      return;
-    }
-
-    // === Bot Interactions ===
-
-    // Check if bot is mentioned
-    if (message.mentions.has(message.client.user!.id)) {
-      await handleMention(message);
-      return;
-    }
-
-    // Log message for audit (optional, can be heavy)
-    // await moderationService.logMessageAction(message, 'sent');
-  } catch (error) {
-    logger.error("Error in messageCreate event:", error);
+const generateAIResponse = async (
+  message: Message,
+  content: string
+): Promise<void> => {
+  if (message.channel.isTextBased() && !message.channel.isDMBased()) {
+    await message.channel.sendTyping();
   }
-}
 
-/**
- * Handle when Shee is mentioned
- */
-async function handleMention(message: Message): Promise<void> {
+  const response = await geminiService.generateFriendlyResponse(content);
+
+  await message.reply({
+    content: response,
+    allowedMentions: { repliedUser: true },
+  });
+
+  logger.info(
+    `AI response sent to ${message.author.tag}: "${content.substring(
+      0,
+      50
+    )}..."`
+  );
+};
+
+const sendFallbackResponse = async (message: Message): Promise<void> => {
+  await message.reply({
+    content: "🫖 Maaf ya, Shee lagi agak bingung nih~ Coba tanya lagi nanti?",
+  });
+};
+
+const handleMention = async (message: Message): Promise<void> => {
   try {
-    // Extract question/comment (remove mention)
-    const content = message.content.replace(/<@!?\d+>/g, "").trim();
+    const content = extractContentWithoutMentions(message.content);
 
     if (!content) {
-      // Just mentioned without text
-      await message.reply("☕ Iya? Ada yang bisa Shee bantu? 💚");
+      await sendDefaultGreeting(message);
       return;
     }
 
-    // Show typing indicator
-    await message.channel.sendTyping();
-
-    // Generate friendly AI response
-    const response = await geminiService.generateFriendlyResponse(content);
-
-    // Reply to message
-    await message.reply({
-      content: response,
-      allowedMentions: { repliedUser: true },
-    });
-
-    logger.info(
-      `AI response sent to ${message.author.tag}: "${content.substring(
-        0,
-        50
-      )}..."`
-    );
+    await generateAIResponse(message, content);
   } catch (error) {
     logger.error("Error handling mention:", error);
+    await sendFallbackResponse(message);
+  }
+};
 
-    // Fallback response
-    await message.reply({
-      content: "🫖 Maaf ya, Shee lagi agak bingung nih~ Coba tanya lagi nanti?",
-    });
+const performModerationChecks = async (message: Message): Promise<boolean> => {
+  const isSpam = await moderationService.checkSpam(message);
+  if (isSpam) {
+    await moderationService.handleSpam(message);
+    return true;
+  }
+
+  const hasBadword = moderationService.checkBadwords(message.content);
+  if (hasBadword) {
+    await moderationService.handleBadword(message);
+    return true;
+  }
+
+  const hasUnauthorizedLink = moderationService.checkUnauthorizedLinks(
+    message.content
+  );
+  if (hasUnauthorizedLink) {
+    await moderationService.handleUnauthorizedLink(message);
+    return true;
+  }
+
+  return false;
+};
+
+export async function execute(message: Message) {
+  if (shouldIgnoreMessage(message)) return;
+
+  try {
+    const violationDetected = await performModerationChecks(message);
+    if (violationDetected) return;
+
+    if (isBotMentioned(message)) {
+      await handleMention(message);
+    }
+  } catch (error) {
+    logger.error("Error in messageCreate event:", error);
   }
 }

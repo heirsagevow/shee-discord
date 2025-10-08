@@ -1,6 +1,6 @@
 import cron from "node-cron";
 import { Client, TextChannel } from "discord.js";
-import { logger } from "../utils/logger";
+import { logger } from "@/utils/logger";
 import { eq } from "drizzle-orm";
 import { cfg } from "@/utils/config";
 import { db } from "@/integrations/drizzle/db";
@@ -11,6 +11,20 @@ import {
 } from "@/integrations/drizzle/schemas/discord";
 import { templateService } from "./template.service";
 import { geminiService } from "./gemini.service";
+
+type MoodType = "motivational" | "chill" | "energetic";
+
+const CRON_SCHEDULES = {
+  morningCheck: "* * * * *",
+  randomChat: "0 * * * *",
+  templateGeneration: "0 3 * * *",
+} as const;
+
+const RANDOM_CHAT_CHANCE = 0.3;
+const EMBED_COLOR = {
+  morning: 0xffd700,
+  coffee: 0xe8c5a5,
+} as const;
 
 export class SchedulerService {
   private static instance: SchedulerService;
@@ -25,48 +39,44 @@ export class SchedulerService {
     return SchedulerService.instance;
   }
 
-  /**
-   * Initialize scheduler with Discord client
-   */
   initialize(client: Client): void {
     this.client = client;
     this.startScheduledJobs();
     logger.info("✅ Scheduler initialized");
   }
 
-  /**
-   * Start all scheduled jobs
-   */
   private startScheduledJobs(): void {
-    // Check for morning messages every minute
-    cron.schedule("* * * * *", () => this.checkMorningMessages());
+    cron.schedule(CRON_SCHEDULES.morningCheck, () =>
+      this.checkMorningMessages()
+    );
 
-    // Random chat check every hour
     if (cfg.ENABLE_RANDOM_CHAT) {
-      cron.schedule("0 * * * *", () => this.checkRandomChat());
+      cron.schedule(CRON_SCHEDULES.randomChat, () => this.checkRandomChat());
     }
 
-    // Template generation check (daily at 3 AM)
-    cron.schedule("0 3 * * *", () => this.checkTemplates());
+    cron.schedule(CRON_SCHEDULES.templateGeneration, () =>
+      this.checkTemplates()
+    );
 
     logger.info("✅ Scheduled jobs started");
   }
 
-  /**
-   * Check and send morning messages
-   */
+  private getCurrentTimeString(): string {
+    const now = new Date();
+    return `${now.getHours().toString().padStart(2, "0")}:${now
+      .getMinutes()
+      .toString()
+      .padStart(2, "0")}`;
+  }
+
+  private async getGuildsWithMorningTime(time: string) {
+    return db.select().from(guilds).where(eq(guilds.morningMessageTime, time));
+  }
+
   private async checkMorningMessages(): Promise<void> {
     try {
-      const now = new Date();
-      const currentTime = `${now.getHours().toString().padStart(2, "0")}:${now
-        .getMinutes()
-        .toString()
-        .padStart(2, "0")}`;
-
-      const guildList = await db
-        .select()
-        .from(guilds)
-        .where(eq(guilds.morningMessageTime, currentTime));
+      const currentTime = this.getCurrentTimeString();
+      const guildList = await this.getGuildsWithMorningTime(currentTime);
 
       for (const guild of guildList) {
         if (guild.morningMessageChannelId) {
@@ -81,36 +91,40 @@ export class SchedulerService {
     }
   }
 
-  /**
-   * Send morning message to a guild
-   */
+  private getRandomMood(): MoodType {
+    const moods: MoodType[] = ["motivational", "chill", "energetic"];
+    return moods[Math.floor(Math.random() * moods.length)];
+  }
+
+  private async fetchChannel(channelId: string): Promise<TextChannel | null> {
+    if (!this.client) return null;
+
+    try {
+      const channel = (await this.client.channels.fetch(
+        channelId
+      )) as TextChannel;
+      return channel?.isTextBased() ? channel : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async sendMorningMessage(
     guildId: string,
     channelId: string
   ): Promise<void> {
     try {
-      if (!this.client) return;
+      const channel = await this.fetchChannel(channelId);
+      if (!channel) return;
 
-      const channel = (await this.client.channels.fetch(
-        channelId
-      )) as TextChannel;
-      if (!channel || !channel.isTextBased()) return;
-
-      // Random mood selection
-      const moods: Array<"motivational" | "chill" | "energetic"> = [
-        "motivational",
-        "chill",
-        "energetic",
-      ];
-      const mood = moods[Math.floor(Math.random() * moods.length)];
-
+      const mood = this.getRandomMood();
       const template = await templateService.getMorningMessageTemplate(mood);
 
       await channel.send({
         content: `☀️ Selamat pagi semuanya!\n\n${template.content}`,
         embeds: [
           {
-            color: 0xffd700, // Gold color
+            color: EMBED_COLOR.morning,
             footer: { text: "☕ Shee • Have a great day!" },
             timestamp: new Date().toISOString(),
           },
@@ -123,19 +137,20 @@ export class SchedulerService {
     }
   }
 
-  /**
-   * Check and send random chat messages
-   */
+  private async getGuildsWithRandomChatEnabled() {
+    return db.select().from(guilds).where(eq(guilds.randomChatEnabled, true));
+  }
+
+  private shouldSendRandomChat(): boolean {
+    return Math.random() < RANDOM_CHAT_CHANCE;
+  }
+
   private async checkRandomChat(): Promise<void> {
     try {
-      const guildList = await db
-        .select()
-        .from(guilds)
-        .where(eq(guilds.randomChatEnabled, true));
+      const guildList = await this.getGuildsWithRandomChatEnabled();
 
       for (const guild of guildList) {
-        // Random chance (30% per check)
-        if (Math.random() < 0.3) {
+        if (this.shouldSendRandomChat()) {
           await this.sendRandomChat(guild.id, guild.randomChatChannels ?? []);
         }
       }
@@ -144,9 +159,25 @@ export class SchedulerService {
     }
   }
 
-  /**
-   * Send random chat message
-   */
+  private getRandomChannel(channelIds: string[]): string {
+    return channelIds[Math.floor(Math.random() * channelIds.length)];
+  }
+
+  private async logRandomChat(
+    guildId: string,
+    channelId: string,
+    content: string
+  ): Promise<void> {
+    const log: NewRandomChatLog = {
+      guildId,
+      channelId,
+      content,
+      aiGenerated: true,
+    };
+
+    await db.insert(randomChatLogs).values(log);
+  }
+
   private async sendRandomChat(
     guildId: string,
     channelIds: string[]
@@ -154,51 +185,31 @@ export class SchedulerService {
     try {
       if (!this.client || channelIds.length === 0) return;
 
-      // Pick random channel
-      const channelId =
-        channelIds[Math.floor(Math.random() * channelIds.length)];
-      const channel = (await this.client.channels.fetch(
-        channelId
-      )) as TextChannel;
+      const channelId = this.getRandomChannel(channelIds);
+      const channel = await this.fetchChannel(channelId);
+      if (!channel) return;
 
-      if (!channel || !channel.isTextBased()) return;
-
-      // Generate casual message
       const message = await geminiService.generateRandomChatMessage();
-
       await channel.send(message);
 
-      // Log to database
-      const log: NewRandomChatLog = {
-        guildId,
-        channelId,
-        content: message,
-        aiGenerated: true,
-      };
-
-      await db.insert(randomChatLogs).values(log);
+      await this.logRandomChat(guildId, channelId, message);
       logger.info(`Random chat sent to guild ${guildId}`);
     } catch (error) {
       logger.error(`Error sending random chat to guild ${guildId}:`, error);
     }
   }
 
-  /**
-   * Check and generate templates if needed
-   */
   private async checkTemplates(): Promise<void> {
     try {
       logger.info("Checking template inventory...");
 
       const stats = await templateService.getTemplateStats();
 
-      // Check welcome templates
       if (stats.welcome.total < 20) {
         logger.info("Generating new welcome templates...");
         await templateService.generateWelcomeTemplates(50);
       }
 
-      // Check morning templates
       if (stats.morning.total < 15) {
         logger.info("Generating new morning templates...");
         await templateService.generateMorningTemplates(20);
@@ -210,9 +221,6 @@ export class SchedulerService {
     }
   }
 
-  /**
-   * Manually trigger morning message for a guild
-   */
   async triggerMorningMessage(guildId: string): Promise<boolean> {
     try {
       const [guild] = await db
@@ -233,9 +241,6 @@ export class SchedulerService {
     }
   }
 
-  /**
-   * Manually trigger random chat for a guild
-   */
   async triggerRandomChat(
     guildId: string,
     channelId?: string
@@ -250,10 +255,9 @@ export class SchedulerService {
       if (!guild) return false;
 
       const channels = channelId ? [channelId] : guild.randomChatChannels;
+      if (!channels || channels.length === 0) return false;
 
-      if (channels?.length === 0) return false;
-
-      await this.sendRandomChat(guildId, channels ?? []);
+      await this.sendRandomChat(guildId, channels);
       return true;
     } catch (error) {
       logger.error("Error triggering random chat:", error);

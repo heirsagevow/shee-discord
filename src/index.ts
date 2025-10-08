@@ -1,38 +1,41 @@
 import { SheeBot } from "./bot";
-import { env } from "./config/env";
+import { cfg } from "./utils/config";
 import { logger } from "./utils/logger";
-import { testConnection, closeDatabase } from "./database/db";
+import { testConnection, closeDatabase } from "./integrations/drizzle/db";
 
-async function main() {
+const logStartupInfo = () => {
   logger.info("🚀 Starting Shee - The Soft Guardian...");
-  logger.info(`Environment: ${env.NODE_ENV}`);
-  logger.info(`Gemini API Keys: ${env.geminiApiKeys.length} available`);
+  logger.info(`Environment: ${process.env.NODE_ENV || "development"}`);
+  logger.info(`Gemini API Keys: ${cfg.GEMINI_API_KEYS.length} available`);
+};
 
-  // Test database connection
-  const dbConnected = await testConnection();
-  if (!dbConnected) {
+const ensureDatabaseConnected = async (): Promise<void> => {
+  const isConnected = await testConnection();
+  if (!isConnected) {
     logger.error("❌ Failed to connect to database");
     process.exit(1);
   }
+};
 
-  // Initialize bot
+const setupGracefulShutdown = (bot: SheeBot) => {
+  const handleShutdown = async (signal: string) => {
+    logger.info(`Received ${signal}, shutting down gracefully...`);
+    await closeDatabase();
+    await bot.shutdown();
+  };
+
+  process.on("SIGINT", () => handleShutdown("SIGINT"));
+  process.on("SIGTERM", () => handleShutdown("SIGTERM"));
+};
+
+async function main() {
+  logStartupInfo();
+  await ensureDatabaseConnected();
+
   const bot = new SheeBot();
+  await bot.start(cfg.DISCORD_TOKEN);
 
-  // Start bot
-  await bot.start(env.DISCORD_TOKEN);
-
-  // Handle process termination
-  process.on("SIGINT", async () => {
-    logger.info("Received SIGINT, shutting down gracefully...");
-    await closeDatabase();
-    await bot.shutdown();
-  });
-
-  process.on("SIGTERM", async () => {
-    logger.info("Received SIGTERM, shutting down gracefully...");
-    await closeDatabase();
-    await bot.shutdown();
-  });
+  setupGracefulShutdown(bot);
 }
 
 main().catch((error) => {
