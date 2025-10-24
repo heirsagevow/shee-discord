@@ -1,17 +1,22 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import {
+  GoogleGenerativeAI,
+  HarmBlockThreshold,
+  HarmCategory,
+} from "@google/generative-ai";
 import { logger } from "@/utils/logger";
 import { cfg } from "@/utils/config";
 import {
-  generateFriendlyResponsePrompt,
   generateMorningTemplatesPrompt,
   generateRandomChatPrompt,
   generateWarningTemplatesPrompt,
   generateWelcomeTemplatesPrompt,
 } from "@/data/prompts";
 
-const RATE_LIMIT_DURATION_MS = 60 * 1000; // 1 minute
+const RATE_LIMIT_DURATION_MS = 60 * 1000;
 const MAX_REQUESTS_PER_MINUTE = 15;
-const MODEL_NAME = "gemini-2.5-flash";
+const MODEL_NAME = "gemini-2.5-flash"; // Use the valid model
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 2000;
 
 const DEFAULT_GENERATION_CONFIG = {
   temperature: 0.8,
@@ -58,15 +63,11 @@ export class GeminiService {
     const window = this.keyUsageWindows.get(index);
     if (!window) return false;
 
-    // Check if manually rate limited
     if (window.rateLimitedUntil > Date.now()) {
       return false;
     }
 
-    // Clean old timestamps
     this.cleanOldTimestamps(window);
-
-    // Check if under rate limit
     return window.timestamps.length < MAX_REQUESTS_PER_MINUTE;
   }
 
@@ -123,28 +124,215 @@ export class GeminiService {
   }
 
   private isRateLimitError(error: any): boolean {
-    return error.message?.includes("429") || error.message?.includes("quota");
+    return (
+      error.message?.includes("429") ||
+      error.message?.includes("quota") ||
+      error.message?.includes("RATE_LIMIT")
+    );
+  }
+
+  private isEmptyResponse(text: string): boolean {
+    const cleaned = text.trim();
+    return (
+      cleaned.length === 0 ||
+      cleaned === '""' ||
+      cleaned === "''" ||
+      cleaned === "{}" ||
+      cleaned === "[]"
+    );
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async generate(
+    prompt: string,
+    options?: { temperature?: number; maxTokens?: number }
+  ): Promise<string> {
+    let lastError: Error | null = null;
+
+    for (let retry = 0; retry < MAX_RETRIES; retry++) {
+      try {
+        if (retry > 0) {
+          logger.info(`Retry attempt ${retry}/${MAX_RETRIES}...`);
+          await this.delay(RETRY_DELAY_MS * retry);
+        }
+
+        const apiKey = this.getNextApiKey();
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({
+          model: MODEL_NAME,
+          safetySettings: [
+            {
+              category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+              threshold: HarmBlockThreshold.BLOCK_NONE,
+            },
+            {
+              category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+              threshold: HarmBlockThreshold.BLOCK_NONE,
+            },
+            {
+              category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+              threshold: HarmBlockThreshold.BLOCK_NONE,
+            },
+            {
+              category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+              threshold: HarmBlockThreshold.BLOCK_NONE,
+            },
+          ],
+        });
+
+        logger.debug(`Sending prompt (${prompt.length} chars) to Gemini...`);
+
+        const result = await model.generateContent({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature:
+              options?.temperature ?? DEFAULT_GENERATION_CONFIG.temperature,
+            maxOutputTokens:
+              options?.maxTokens ?? DEFAULT_GENERATION_CONFIG.maxOutputTokens,
+          },
+        });
+
+        const response = result.response;
+
+        // Debug: Log full response object including candidates
+        const candidate = response.candidates?.[0];
+        logger.debug("Gemini response object:", {
+          candidates: response.candidates?.length,
+          promptFeedback: response.promptFeedback,
+          finishReason: candidate?.finishReason,
+          safetyRatings: candidate?.safetyRatings,
+          hasContent: !!candidate?.content,
+          contentParts: candidate?.content?.parts?.length,
+        });
+
+        // Check if response was blocked
+        if (response.promptFeedback?.blockReason) {
+          logger.error("Prompt was blocked:", {
+            blockReason: response.promptFeedback.blockReason,
+            safetyRatings: response.promptFeedback.safetyRatings,
+          });
+          lastError = new Error(
+            `Prompt blocked: ${response.promptFeedback.blockReason}`
+          );
+          continue;
+        }
+
+        // Check finish reason
+        const finishReason = candidate?.finishReason;
+        if (finishReason && finishReason !== "STOP") {
+          logger.error("Response blocked or incomplete:", {
+            finishReason,
+            safetyRatings: candidate?.safetyRatings,
+            blockReasonMessage:
+              candidate?.content?.parts?.[0]?.text || "No text",
+          });
+
+          // If blocked by safety, continue to retry
+          if (finishReason === "SAFETY" || finishReason === "RECITATION") {
+            lastError = new Error(`Response blocked: ${finishReason}`);
+            continue;
+          }
+
+          // If max tokens, also retry with higher limit
+          if (finishReason === "MAX_TOKENS") {
+            logger.warn("Hit max tokens limit, continuing anyway...");
+          }
+        }
+
+        const text = response.text();
+
+        logger.debug(`Raw Gemini response (${text.length} chars):`, {
+          preview: text.substring(0, 200),
+          fullText: text,
+        });
+
+        if (this.isEmptyResponse(text)) {
+          logger.warn(
+            `Empty response from AI (attempt ${retry + 1}/${MAX_RETRIES})`
+          );
+          lastError = new Error("AI returned empty response");
+          continue;
+        }
+
+        logger.info("Generated text from Gemini", { length: text.length });
+        return text;
+      } catch (error: any) {
+        lastError = error;
+        logger.error(`Gemini generation error (attempt ${retry + 1}):`, {
+          error: error.message,
+          stack: error.stack,
+          name: error.name,
+        });
+
+        if (this.isRateLimitError(error)) {
+          const failedKeyIndex =
+            (this.currentKeyIndex - 1 + cfg.GEMINI_API_KEYS.length) %
+            cfg.GEMINI_API_KEYS.length;
+          this.markKeyAsRateLimited(failedKeyIndex);
+          continue;
+        }
+
+        if (retry < MAX_RETRIES - 1) {
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    throw (
+      lastError ||
+      new Error(`Failed to generate text after ${MAX_RETRIES} retries`)
+    );
   }
 
   private extractJsonArray(response: string): string[] {
     const jsonMatch = response.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) throw new Error("No JSON array found in response");
-    return JSON.parse(jsonMatch[0]);
+    if (!jsonMatch) {
+      logger.error(
+        "No JSON array found in response:",
+        response.substring(0, 200)
+      );
+      throw new Error("No JSON array found in response");
+    }
+
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (!Array.isArray(parsed)) {
+        throw new Error("Parsed response is not an array");
+      }
+      return parsed;
+    } catch (error) {
+      logger.error("Failed to parse JSON array:", error);
+      throw new Error("Failed to parse AI response as JSON array");
+    }
   }
 
   private extractWarningTemplates(
     response: string
   ): Array<{ type: string; content: string; severity: string }> {
     const jsonMatch = response.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) throw new Error("No JSON array found in response");
+    if (!jsonMatch) {
+      logger.error(
+        "No JSON array found in response:",
+        response.substring(0, 200)
+      );
+      throw new Error("No JSON array found in response");
+    }
 
     try {
       const parsed = JSON.parse(jsonMatch[0]);
-      if (!Array.isArray(parsed)) throw new Error("Response is not an array");
+      if (!Array.isArray(parsed)) {
+        throw new Error("Response is not an array");
+      }
 
-      return parsed.map((item) => {
+      return parsed.map((item, index) => {
         if (!item.type || !item.content || !item.severity) {
-          throw new Error("Invalid template structure");
+          logger.error(`Invalid template structure at index ${index}:`, item);
+          throw new Error(`Invalid template structure at index ${index}`);
         }
         return {
           type: item.type,
@@ -162,15 +350,24 @@ export class GeminiService {
     response: string
   ): Array<{ content: string; moodTag: string }> {
     const jsonMatch = response.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) throw new Error("No JSON array found in response");
+    if (!jsonMatch) {
+      logger.error(
+        "No JSON array found in response:",
+        response.substring(0, 200)
+      );
+      throw new Error("No JSON array found in response");
+    }
 
     try {
       const parsed = JSON.parse(jsonMatch[0]);
-      if (!Array.isArray(parsed)) throw new Error("Response is not an array");
+      if (!Array.isArray(parsed)) {
+        throw new Error("Response is not an array");
+      }
 
-      return parsed.map((item) => {
+      return parsed.map((item, index) => {
         if (!item.content || !item.moodTag) {
-          throw new Error("Invalid template structure");
+          logger.error(`Invalid template structure at index ${index}:`, item);
+          throw new Error(`Invalid template structure at index ${index}`);
         }
         return {
           content: item.content,
@@ -183,51 +380,6 @@ export class GeminiService {
     }
   }
 
-  async generate(
-    prompt: string,
-    options?: { temperature?: number; maxTokens?: number }
-  ): Promise<string> {
-    const maxRetries = cfg.GEMINI_API_KEYS.length;
-    let lastError: Error | null = null;
-
-    for (let retry = 0; retry < maxRetries; retry++) {
-      try {
-        const apiKey = this.getNextApiKey();
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: MODEL_NAME });
-
-        const result = await model.generateContent({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature:
-              options?.temperature ?? DEFAULT_GENERATION_CONFIG.temperature,
-            maxOutputTokens:
-              options?.maxTokens ?? DEFAULT_GENERATION_CONFIG.maxOutputTokens,
-          },
-        });
-
-        const text = result.response.text();
-        logger.info("Generated text from Gemini", { length: text.length });
-        return text;
-      } catch (error: any) {
-        lastError = error;
-        logger.error("Gemini generation error:", error);
-
-        if (this.isRateLimitError(error)) {
-          const failedKeyIndex =
-            (this.currentKeyIndex - 1 + cfg.GEMINI_API_KEYS.length) %
-            cfg.GEMINI_API_KEYS.length;
-          this.markKeyAsRateLimited(failedKeyIndex);
-          continue;
-        }
-
-        throw error;
-      }
-    }
-
-    throw lastError || new Error("Failed to generate text after all retries");
-  }
-
   async generateWelcomeTemplates(count = 50): Promise<string[]> {
     const prompt = generateWelcomeTemplatesPrompt(count);
 
@@ -236,14 +388,9 @@ export class GeminiService {
       maxTokens: 3000,
     });
 
-    try {
-      const templates = this.extractJsonArray(response);
-      logger.info(`Generated ${templates.length} welcome templates`);
-      return templates;
-    } catch (error) {
-      logger.error("Failed to parse welcome templates:", error);
-      throw new Error("Failed to parse AI response");
-    }
+    const templates = this.extractJsonArray(response);
+    logger.info(`Generated ${templates.length} welcome templates`);
+    return templates;
   }
 
   async generateWarningTemplates(
@@ -256,14 +403,9 @@ export class GeminiService {
       maxTokens: 3000,
     });
 
-    try {
-      const templates = this.extractWarningTemplates(response);
-      logger.info(`Generated ${templates.length} warning templates`);
-      return templates;
-    } catch (error) {
-      logger.error("Failed to parse warning templates:", error);
-      throw new Error("Failed to parse AI response");
-    }
+    const templates = this.extractWarningTemplates(response);
+    logger.info(`Generated ${templates.length} warning templates`);
+    return templates;
   }
 
   async generateMorningTemplates(
@@ -276,22 +418,9 @@ export class GeminiService {
       maxTokens: 3000,
     });
 
-    try {
-      const templates = this.extractMorningTemplates(response);
-      logger.info(`Generated ${templates.length} morning templates`);
-      return templates;
-    } catch (error) {
-      logger.error("Failed to parse morning templates:", error);
-      throw new Error("Failed to parse AI response");
-    }
-  }
-
-  async generateFriendlyResponse(
-    question: string,
-    context?: string
-  ): Promise<string> {
-    const prompt = generateFriendlyResponsePrompt(question, context);
-    return this.generate(prompt, { temperature: 0.8, maxTokens: 200 });
+    const templates = this.extractMorningTemplates(response);
+    logger.info(`Generated ${templates.length} morning templates`);
+    return templates;
   }
 
   async generateRandomChatMessage(): Promise<string> {
@@ -305,10 +434,32 @@ export class GeminiService {
     ];
 
     const topic = topics[Math.floor(Math.random() * topics.length)];
-
     const prompt = generateRandomChatPrompt(topic);
 
-    return this.generate(prompt, { temperature: 0.95, maxTokens: 100 });
+    const response = await this.generate(prompt, {
+      temperature: 0.95,
+      maxTokens: 100,
+    });
+
+    let cleaned = response.trim();
+    cleaned = cleaned.replace(/```[\s\S]*?```/g, "");
+    cleaned = cleaned.replace(/`[^`]*`/g, "");
+
+    if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
+      cleaned = cleaned.slice(1, -1);
+    }
+    if (cleaned.startsWith("'") && cleaned.endsWith("'")) {
+      cleaned = cleaned.slice(1, -1);
+    }
+
+    cleaned = cleaned.trim();
+
+    if (this.isEmptyResponse(cleaned)) {
+      logger.error("Random chat response is empty after cleaning");
+      throw new Error("Generated random chat message is empty");
+    }
+
+    return cleaned;
   }
 
   getUsageStats() {
